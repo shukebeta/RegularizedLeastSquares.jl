@@ -68,6 +68,9 @@ Creates a `POGM` object for the forward operator `A` or normal operator `AHA`. P
   * `restart::Symbol`                                   - `:none`, `:gradient` options for restarting
   * `verbose::Bool`                                     - print residual in each iteration
 
+For a LinearOperatorCollection.jl operator `A`, the default `AHA = A'*A` is an opaque product; pass
+`AHA = normalOperator(A)` to move the solver to another array backend with [`Adapt.adapt`](@ref Adapt.adapt_structure(::Any, ::RegularizedLeastSquares.ProximalSolver)).
+
 See also [`createLinearSolver`](@ref), [`solve!`](@ref).
 """
 POGM(; AHA, kwargs...) = POGM(nothing; kwargs..., AHA = AHA)

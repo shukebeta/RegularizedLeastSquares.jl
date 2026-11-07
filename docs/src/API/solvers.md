@@ -40,6 +40,11 @@ RegularizedLeastSquares.OptISTA
 RegularizedLeastSquares.POGM
 ```
 
+## Moving FISTA, OptISTA and POGM to another array backend
+```@docs
+RegularizedLeastSquares.Adapt.adapt_structure(::Any, ::RegularizedLeastSquares.ProximalSolver)
+```
+
 ## SplitBregman
 ```@docs
 RegularizedLeastSquares.SplitBregman

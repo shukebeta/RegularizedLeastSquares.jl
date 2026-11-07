@@ -55,6 +55,9 @@ OR
 * `iterations::Int`                                   - maximum number of iterations
 * `verbose::Bool`                                     - print residual in each iteration
 
+For a LinearOperatorCollection.jl operator `A`, the default `AHA = A'*A` is an opaque product; pass
+`AHA = normalOperator(A)` to move the solver to another array backend with [`Adapt.adapt`](@ref Adapt.adapt_structure(::Any, ::RegularizedLeastSquares.ProximalSolver)).
+
 See also [`createLinearSolver`](@ref), [`solve!`](@ref).
 """
 OptISTA(; AHA, kwargs...) = OptISTA(nothing; AHA = AHA, kwargs...)

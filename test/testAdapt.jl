@@ -148,11 +148,16 @@ function testCGNRAdaptErrors(target)
   @test_throws ArgumentError Adapt.adapt(target, CGNR(s.A, s.AHA, s.L2, [CustomProjection()], s.normalizeReg, s.iterations, s.state))
   @test_throws ArgumentError Adapt.adapt(target, CGNR(s.A, s.AHA, L2Regularization(fill(0.1f0, n)), s.constr, s.normalizeReg, s.iterations, s.state))
 
-  # an operator shared in a nested position cannot be split into separate copies
+  # an operator shared in a nested position stays one object, owned by the adapted solver
   Psq = ProdOp(WeightingOp(rand(adaptRng, Float32, n) .+ 0.5f0), B)
   shared = CGNR(Psq; reg = [L2Regularization(0.1f0), TransformedRegularization(RealRegularization(), Psq.A)])
-  err = try Adapt.adapt(target, shared) catch e e end
-  @test err isa ArgumentError && occursin("shared", sprint(showerror, err))
+  moved = Adapt.adapt(target, shared)
+  @test moved.constr[1].trafo === moved.A.A && moved.AHA.parent === moved.A
+  rhs = Float32.(1:n)
+  @test Array(solve!(moved, target(rhs))) ≈ solve!(deepcopy(shared), rhs) rtol = 2e-4
+  weights = copy(Psq.A.weights)
+  fill!(moved.A.A.weights, 0)
+  @test Psq.A.weights == weights && shared.constr[1].trafo === Psq.A
 end
 
 # Adaptors that only move or convert part of the graph (CPU only, they target JLArray)

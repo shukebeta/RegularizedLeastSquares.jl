@@ -22,7 +22,7 @@ solver = createLinearSolver(CGNR, Array(A); reg = L2Regularization(0.0001), iter
 x_cpu = solve!(solver, Array(b))
 isapprox(Array(x_approx), x_cpu)
 
-# ## Moving a CGNR Solver with Adapt.jl
+# ## Moving a Solver with Adapt.jl
 # A `CGNR` solver can also be moved as a whole with [Adapt.jl](https://github.com/JuliaGPU/Adapt.jl). `Adapt.adapt` returns a new solver
 # whose operators, regularization and state all live on the target backend, and leaves the original solver untouched:
 using Adapt
@@ -34,7 +34,24 @@ isapprox(Array(x_adapted), x_cpu)
 # This works for dense matrices and for LinearOperatorCollection.jl operators that support Adapt.jl, including the default normal operator CGNR builds for them.
 # Initialized solvers keep their progress, including the multi-frame states created by matrix-valued `solve!`. Unsupported operators, such as closure-based
 # `LinearOperator`s, raise an `ArgumentError` instead of producing a solver that mixes backends.
-# Other solvers do not support `Adapt.adapt` yet; for them, construct the solver from operators that already live on the GPU, as shown below.
+
+# `FISTA`, `OptISTA` and `POGM` are moved in the same way, also after they have started iterating: the adapted solver
+# resumes where the source stopped, with the same step size, momentum and iteration count, and the source is not modified.
+cpu_fista = createLinearSolver(FISTA, Array(A); reg = L1Regularization(0.0001f0), iterations = 32);
+init!(cpu_fista, Array(b))
+for _ in 1:5
+  iterate(cpu_fista)
+end
+gpu_fista = Adapt.adapt(gpu, cpu_fista)
+for _ in 1:5
+  iterate(gpu_fista)
+end
+solversolution(gpu_fista);
+# For a LinearOperatorCollection.jl operator `A`, these solvers default to the opaque product `AHA = A' * A`, which cannot be moved;
+# construct them with `AHA = normalOperator(A)` instead.
+
+# Other solvers (`Kaczmarz`, `ADMM`, `SplitBregman` and the direct solvers) do not support `Adapt.adapt` yet; for them, construct the
+# solver from operators that already live on the GPU, as shown below.
 
 # Regularization terms can be moved on their own, for example to pass them to a solver built from GPU operators.
 # `Adapt.adapt(gpu, reg)` rebuilds the built-in terms and wrappers with their effective state, such as an initialized

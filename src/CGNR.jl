@@ -68,7 +68,7 @@ An `ArgumentError` is thrown instead of returning a partially moved solver for u
 targets, operators without an Adapt rule (including closure-based `LinearOperator`s and products
 such as `A' * A` of operators), and unsupported custom states or regularization terms.
 
-Among the solvers, only `CGNR` supports `Adapt.adapt` so far.
+Among the solvers, `CGNR`, [`FISTA`](@ref), [`OptISTA`](@ref) and [`POGM`](@ref) support `Adapt.adapt`.
 
 See also [`createLinearSolver`](@ref), [`solve!`](@ref).
 """
@@ -237,7 +237,6 @@ struct CGNRAdaptContext{TO, F}
   subject::String               # what is being adapted, for error messages
 end
 
-adaptError(msg) = throw(ArgumentError("cannot adapt CGNR: " * msg))
 adaptError(ctx::CGNRAdaptContext, msg) = throw(ArgumentError("cannot adapt $(ctx.subject): " * msg))
 
 baseArray(x::AbstractArray) = (p = parent(x); p === x ? x : baseArray(p))
@@ -245,30 +244,41 @@ arrayFamily(x::AbstractArray) = Base.typename(typeof(baseArray(x))).wrapper
 
 # Wraps the user's adaptor and copies every numeric array it leaves in place (e.g. `Array` on a CPU
 # solver), so that operators rebuilt by their Adapt rules get their own workspaces instead of sharing
-# them, and the closures capturing them, with the source solver.
+# them, and the closures capturing them, with the source solver. Every operator is rebuilt once per
+# wrapper (`ops`), so an operator shared anywhere in the source graph stays one object.
 struct CGNRFreshArrays{TO}
   to::TO
+  ops::IdDict{Any, Any}         # source operator => rebuilt operator
 end
+CGNRFreshArrays(to) = CGNRFreshArrays(to, IdDict{Any, Any}())
 function Adapt.adapt_storage(a::CGNRFreshArrays, x)
   y = Adapt.adapt(a.to, x)
   return y === x && x isa AbstractArray{<:Number} ? copy(x) : y
 end
+Adapt.adapt(a::CGNRFreshArrays, op::AbstractLinearOperator) = get!(() -> Adapt.adapt_structure(a, op), a.ops, op)
 typeFamily(S::Type) = Base.typename(Base.unwrap_unionall(S)).wrapper
 
-cgnrStates(state::CGNRState) = [state]
-cgnrStates(state::Union{SequentialState, MultiThreadingState}) = state.states
-cgnrStates(state) = adaptError("unsupported solver state $(typeof(state))")
+leafStates(state::Union{SequentialState, MultiThreadingState}) = state.states
+leafStates(state) = [state]
 
-function Adapt.adapt_structure(to, solver::CGNR)
-  states = cgnrStates(solver.state)
-  isempty(states) && adaptError("the solver state contains no CGNR states")
-  first(states) isa CGNRState || adaptError("unsupported solver state $(typeof(first(states)))")
+# Checks the solver state and the target, and returns the context for adapting `solver`, whose
+# (leaf) states must be of type `ST`.
+function solverAdaptContext(to, solver, ST)
+  subject = String(nameof(typeof(solver)))
+  fail(msg) = throw(ArgumentError("cannot adapt $subject: " * msg))
+  states = leafStates(solver.state)
+  isempty(states) && fail("the solver state contains no $subject states")
+  first(states) isa ST || fail("unsupported solver state $(typeof(first(states)))")
   x = first(states).x
-  to isa Type && isabstracttype(to) && adaptError("unsupported Adapt target $to (abstract type)")
+  to isa Type && isabstracttype(to) && fail("unsupported Adapt target $to (abstract type)")
   x′ = Adapt.adapt(to, x)
   supported = x′ isa AbstractVector && eltype(x′) == eltype(x) && (to isa Type ? x′ isa to : x′ !== x)
-  supported || adaptError("unsupported Adapt target $to: Adapt.adapt returned $(typeof(x′)) for a state vector of type $(typeof(x))")
-  ctx = CGNRAdaptContext(CGNRFreshArrays(to), arrayFamily(x′), IdDict{Any, Any}(), IdDict{Any, Any}(), "CGNR")
+  supported || fail("unsupported Adapt target $to: Adapt.adapt returned $(typeof(x′)) for a state vector of type $(typeof(x))")
+  return CGNRAdaptContext(CGNRFreshArrays(to), arrayFamily(x′), IdDict{Any, Any}(), IdDict{Any, Any}(), subject)
+end
+
+function Adapt.adapt_structure(to, solver::CGNR)
+  ctx = solverAdaptContext(to, solver, CGNRState)
 
   A = adaptComponent(ctx, solver.A, "A")
   AHA = adaptNormal(ctx, solver.A, A, solver.AHA)
@@ -294,7 +304,7 @@ end
 # A NormalOp that refers to A (or to the inner operand of a weighted ProdOp A) is rebuilt on the adapted
 # operand, so that the adapted AHA keeps acting on the adapted forward operator. Its weights are its own.
 function adaptNormal(ctx::CGNRAdaptContext, A, A′, AHA)
-  if AHA isa LinearOperatorCollection.NormalOp && !haskey(ctx.memo, AHA) && !isnothing(A)
+  if AHA isa LinearOperatorCollection.NormalOp && !haskey(ctx.memo, AHA) && !haskey(ctx.to.ops, AHA) && !isnothing(A)
     parent′ = if AHA.parent === A
       A′
     elseif A isa LinearOperatorCollection.ProdOp && AHA.parent === A.B
@@ -306,6 +316,7 @@ function adaptNormal(ctx::CGNRAdaptContext, A, A′, AHA)
       weights′ = adaptComponent(ctx, AHA.weights, "AHA weights")
       AHA′ = NormalOp(eltype(AHA); parent = parent′, weights = weights′)
       checkPair(ctx, AHA, AHA′, "AHA")
+      ctx.to.ops[AHA] = AHA′    # an AHA nested in a term resolves to this object
       return ctx.memo[AHA] = AHA′
     end
   end

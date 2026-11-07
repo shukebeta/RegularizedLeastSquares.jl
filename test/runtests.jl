@@ -15,4 +15,5 @@ arrayType = isTypeDefined ? arrayType : Array
   include("testMultiThreading.jl")
   include("testAdapt.jl")
   include("testAdaptRegularization.jl")
+  include("testAdaptProximal.jl")
 end
