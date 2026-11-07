@@ -122,7 +122,7 @@ adaptCallable(ctx::CGNRAdaptContext, f, name) = get!(ctx.memo, f) do
   elseif rule === fallbackRule(Adapt.adapt_structure, Any)   # generic fallback, unless there is a storage rule
     adaptRule(Adapt.adapt_storage, to, F) === fallbackRule(Adapt.adapt_storage, Any) && missingRule()
   elseif rule === fallbackRule(Adapt.adapt_structure, Function)   # Adapt's closure rule
-    (fieldcount(F) == 0 || startswith(String(nameof(F)), '#')) || missingRule()   # compiler-generated function types only
+    startswith(String(nameof(F)), '#') || missingRule()   # compiler-generated function types only, not user `<: Function` structs
     plain(T) = T <: Union{Number, AbstractArray{<:Number}} && adaptRule(Adapt.adapt_structure, ctx.to, T) === fallbackRule(Adapt.adapt_structure, Any)
     f′ = Adapt.adapt(all(plain, fieldtypes(F)) ? ctx.to : to, f)
     f′ === f && Core.Box in fieldtypes(F) &&
@@ -139,12 +139,20 @@ adaptDims(dims::AbstractArray) = dims isa AbstractRange ? dims : collect(dims)
 adaptDims(dims) = dims
 
 # Scale factors are scalars or `nothing`, except for array-valued L2 weights, where they can be arrays as well
-adaptFactor(ctx::CGNRAdaptContext, factor::AbstractArray{<:Number}, name = "scale factor") = adaptVector(ctx, factor, name)
-adaptFactor(ctx::CGNRAdaptContext, factor, name = "scale factor") = factor
+adaptFactor(ctx::CGNRAdaptContext, factor::AbstractArray{<:Number}) = adaptVector(ctx, factor, "scale factor")
+adaptFactor(ctx::CGNRAdaptContext, factor) = factor
 
-# Transform objects created by the input-transform factories, e.g. retained by a custom factory
+# Transform objects created by the input-transform factories, e.g. retained by a custom factory. Their arrays are adapted
+# with the user's adaptor, so that its rules apply also below views; what still shares the source memory is copied.
 const DataTransform = Union{MinMaxTransform, ZTransform, ClampedScalingTransform}
 function Adapt.adapt_structure(to, t::T) where T <: DataTransform
   ctx = regularizationAdaptContext(to)
-  return T(map(f -> adaptFactor(ctx, getfield(t, f), "$(nameof(T)).$f"), fieldnames(T))...)
+  return T(map(f -> adaptRetained(ctx, getfield(t, f), "$(nameof(T)).$f"), fieldnames(T))...)
 end
+function adaptRetained(ctx::CGNRAdaptContext, v::AbstractArray{<:Number}, name)
+  v′ = Adapt.adapt(ctx.to.to, v)
+  v′ isa AbstractArray && baseArray(v′) === baseArray(v) && (v′ = copy(v′))
+  checkArray(ctx, v, v′, name)
+  return v′
+end
+adaptRetained(ctx::CGNRAdaptContext, v, name) = v
