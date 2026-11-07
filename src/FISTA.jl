@@ -59,8 +59,9 @@ For a LinearOperatorCollection.jl operator `A`, the default `AHA = A'*A` is an o
 from GPU operators, or used with GPU data, must first be moved with `Adapt.adapt(target, solver)`. The operators,
 the state, `b` and an array-valued `x0` must share one backend, otherwise `init!` and `solve!` throw an
 `ArgumentError` before modifying the solver. Views and other wrappers of arrays on the solver's backend use the
-solver's existing buffers; a `b` of another element type on that backend, e.g. a complex `b` for a real solver,
-continues with state vectors of that element type.
+solver's existing buffers. A complex `b` of the solver's precision for a real solver, e.g. `ComplexF32` for `Float32`,
+continues with complex state vectors on the solver's backend. A `b` of higher precision, e.g. `Float64` for a
+`Float32` solver, is not supported and throws before the solver is modified.
 
 A matrix `b` creates one state per column, copied from the current state on the solver's backend, and runs them
 with the `scheduler` passed to `init!`/`solve!`; a later vector `b` reuses the state of the first column.

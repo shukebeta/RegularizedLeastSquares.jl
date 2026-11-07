@@ -61,11 +61,15 @@ function opaqueNormal(ctx::CGNRAdaptContext, A, AHA)
   return AHA′ === AHA
 end
 
-# Vectors are moved (or copied) and checked; scalars and counters are kept as they are.
-adaptState(ctx::CGNRAdaptContext, state::S) where S <: ProximalState = Base.typename(S).wrapper(map(fieldnames(S)) do f
+# A new state of the same type whose numeric arrays are replaced by `g(array, fieldname)`; scalars and counters are
+# kept as they are. Shared by Adapt and element-type promotion so that both cover the same fields.
+mapStateArrays(g, state::S) where S <: ProximalState = Base.typename(S).wrapper(map(fieldnames(S)) do f
   v = getfield(state, f)
-  v isa AbstractArray{<:Number} ? adaptVector(ctx, v, "state.$f") : v
+  v isa AbstractArray{<:Number} ? g(v, f) : v
 end...)
+
+# Vectors are moved (or copied) and checked.
+adaptState(ctx::CGNRAdaptContext, state::ProximalState) = mapStateArrays((v, f) -> adaptVector(ctx, v, "state.$f"), state)
 
 # Backends: FISTA, OptISTA and POGM never change backends implicitly
 
@@ -107,10 +111,7 @@ end
 # A copy of `state` whose vectors have element type `T` and live on the state's backend, for a `b` of another element
 # type (e.g. a complex `b` for a real solver). Scalars and counters are kept; `init!` resets them. Element types that
 # the state type does not allow, e.g. `Float64` vectors with `Float32` scalars, throw here, before the solver changes.
-promoteState(state::S, ::Type{T}) where {S <: ProximalState, T} = Base.typename(S).wrapper(map(fieldnames(S)) do f
-  v = getfield(state, f)
-  v isa AbstractArray{<:Number} ? similar(v, T, size(v)) : v
-end...)
+promoteState(state::ProximalState, ::Type{T}) where T = mapStateArrays((v, _) -> similar(v, T, size(v)), state)
 matchingState(state, b) = eltype(state.x) == eltype(b) ? state : promoteState(state, eltype(b))
 
 # `b` with another element type than the state: continue with a promoted state on the solver's backend. Arrays with the

@@ -167,6 +167,14 @@ function proxMixedState(s::ST, x) where ST
   return Base.typename(ST).wrapper{real(T), AbstractVector{T}}((f === :x ? x : getfield(s, f) for f in fieldnames(ST))...)
 end
 
+# A dense vector type outside `Array` and GPUArrays whose memory host BLAS cannot use, as Reactant's concrete arrays
+struct ProxForeignVector{T} <: DenseVector{T}
+  data::Vector{T}
+end
+Base.size(v::ProxForeignVector) = size(v.data)
+Base.getindex(v::ProxForeignVector, i::Int) = v.data[i]
+Base.setindex!(v::ProxForeignVector, x, i::Int) = (v.data[i] = x)
+
 function testProximalBackendRejects(S, target)
   A, B, x0 = proxFixture(ComplexF32)
   b = B[:, 1]
@@ -188,6 +196,13 @@ function testProximalBackendRejects(S, target)
       end
     end
   end
+
+  # dense arrays of other array types are not host arrays, even outside GPUArrays
+  solver = proxSolver(S, A)
+  @test proxTag(ProxForeignVector(b)) != cpu
+  proxRejected(() -> init!(solver, ProxForeignVector(copy(b))), solver, "b is on backend ProxForeignVector", cpu)
+  proxRejected(() -> init!(solver, b; x0 = ProxForeignVector(copy(x0))), solver, "x0 is on backend ProxForeignVector", cpu)
+  @test_throws ArgumentError init!(CGNR(A; iterations = 2), ProxForeignVector(copy(b))) # the tags are CGNR's
 
   # operators on another backend than the (default CPU) state, even if b matches the state: the implicit switch of
   # a solver constructed from GPU operators is no longer taken
