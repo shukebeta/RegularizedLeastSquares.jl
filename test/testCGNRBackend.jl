@@ -104,6 +104,7 @@ function testCGNRBackendRejects(target)
   A, B, x0 = backendFixture(ComplexF32)
   b = B[:, 1]
   cpu, dev = backendTag(zeros(ComplexF32, 1)), backendTag(target(zeros(ComplexF32, 1)))
+  @test dev != cpu && backendTag(view(target(b), 2:4)) == dev && backendTag(view(b, 2:4)) == cpu
   for (own, other, ownTag, otherTag) in ((identity, target, cpu, dev), (target, Array, dev, cpu))
     for kind in (:fresh, :vector, SequentialState, MultiThreadingState)
       solver = preparedSolver(A, B, own, kind)
@@ -142,10 +143,8 @@ function testCGNRBackendSparse()
   A, B, x0 = backendFixture(Float32)
   b = B[:, 1]
   cpu, dev = backendTag(zeros(Float32, 1)), backendTag(JLArray(zeros(Float32, 1)))
-  @test dev != cpu
   @test backendTag(JLSparseVector(sparsevec(b))) == backendTag(JLSparseMatrixCSC(sparse(A))) == dev
   @test backendTag(JLSparseVector{Float32, Int}) == backendTag(JLArray{Float32, 1}) == dev
-  @test backendTag(view(JLArray(b), 2:4)) == dev
 
   # device sparse data or operators with a CPU state
   solver = backendSolver(A)
@@ -214,5 +213,8 @@ end
       @testset "frames $scheduler" begin testCGNRBackendFrames(backendTarget, scheduler) end
     end
   end
-  arrayType === Array && @testset "sparse" begin testCGNRBackendSparse() end
+  # GPU sparse arrays need GPUArrays/JLArrays releases with sparse support
+  if arrayType === Array && isdefined(JLArrays, :JLSparseVector)
+    @testset "sparse" begin testCGNRBackendSparse() end
+  end
 end
