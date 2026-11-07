@@ -13,28 +13,37 @@ A = gpu(rand(Float32, 32, 16))
 x = gpu(rand(Float32, 16))
 b = A*x;
 
-# Solvers adapt their states based on the type of the given measurement vector. This means that the solver will automatically switch to GPU acceleration if a GPU array is passed as the measurement vector.
-solver = createLinearSolver(CGNR, A; reg = L2Regularization(0.0001), iterations=32);
-x_approx = solve!(solver, b)
-
-# This adaption does not include the operator. So if we want to compare with CPU result, we need to construct a new solver with a CPU operator.
-solver = createLinearSolver(CGNR, Array(A); reg = L2Regularization(0.0001), iterations=32);
-x_cpu = solve!(solver, Array(b))
-isapprox(Array(x_approx), x_cpu)
-
 # ## Moving a CGNR Solver with Adapt.jl
-# A `CGNR` solver can also be moved as a whole with [Adapt.jl](https://github.com/JuliaGPU/Adapt.jl). `Adapt.adapt` returns a new solver
+# A `CGNR` solver is moved to the GPU as a whole with [Adapt.jl](https://github.com/JuliaGPU/Adapt.jl). We construct it on the CPU, and `Adapt.adapt` returns a new solver
 # whose operators, regularization and state all live on the target backend, and leaves the original solver untouched:
 using Adapt
 cpu_solver = createLinearSolver(CGNR, Array(A); reg = L2Regularization(0.0001), iterations=32);
-gpu_solver = Adapt.adapt(gpu, cpu_solver)
-x_adapted = solve!(gpu_solver, b)
-isapprox(Array(x_adapted), x_cpu)
+gpu_solver = Adapt.adapt(gpu, cpu_solver);
+
+# The moved solver is initialized and iterated with data on the GPU, which is what `solve!(gpu_solver, b)` does as well:
+init!(gpu_solver, b)
+while !isnothing(iterate(gpu_solver)) end
+x_approx = solversolution(gpu_solver)
+
+# To compare with the CPU result, we solve with the original CPU solver and CPU data:
+x_cpu = solve!(cpu_solver, Array(b))
+isapprox(Array(x_approx), x_cpu)
+
+# `CGNR` does not change backends on its own. If its operators, its state, `b` or an array-valued `x0` live on different backends, `init!` and `solve!` throw an `ArgumentError`
+# before modifying the solver, for example when a CPU solver receives a GPU `b`, or when a `CGNR` constructed from a GPU matrix still has its default CPU state.
+# Views of arrays on the solver's backend are accepted.
+
+# A matrix of measurements is solved with one state per column on the solver's backend, and a later vector reuses the state of the first column:
+X = gpu(rand(Float32, 16, 3))
+B = A*X
+X_approx = solve!(gpu_solver, B)
+x_first = solve!(gpu_solver, B[:, 1])
+isapprox(Array(X_approx[:, 1]), Array(x_first))
 
 # This works for dense matrices and for LinearOperatorCollection.jl operators that support Adapt.jl, including the default normal operator CGNR builds for them.
 # Initialized solvers keep their progress, including the multi-frame states created by matrix-valued `solve!`. Unsupported operators, such as closure-based
 # `LinearOperator`s, raise an `ArgumentError` instead of producing a solver that mixes backends.
-# Other solvers do not support `Adapt.adapt` yet; for them, construct the solver from operators that already live on the GPU, as shown below.
+# Other solvers do not support `Adapt.adapt` yet and allocate their states based on the type of the given measurement vector; for them, construct the solver from operators that already live on the GPU, as shown below.
 
 # ## Matrix-Free Operators
 # A special case is the usage of matrix-free operators. Since these operators do not have a concrete matrix representation, their GPU support depends on their implementation.
