@@ -13,24 +13,26 @@ A = gpu(rand(Float32, 32, 16))
 x = gpu(rand(Float32, 16))
 b = A*x;
 
-# Solvers adapt their states based on the type of the given measurement vector. This means that the solver will automatically switch to GPU acceleration if a GPU array is passed as the measurement vector.
-solver = createLinearSolver(CGNR, A; reg = L2Regularization(0.0001), iterations=32);
-x_approx = solve!(solver, b)
-
-# This adaption does not include the operator. So if we want to compare with CPU result, we need to construct a new solver with a CPU operator.
-solver = createLinearSolver(CGNR, Array(A); reg = L2Regularization(0.0001), iterations=32);
-x_cpu = solve!(solver, Array(b))
-isapprox(Array(x_approx), x_cpu)
-
 # ## Moving a CGNR Solver with Adapt.jl
-# A `CGNR` solver can also be adapted to the target backend with [Adapt.jl](https://github.com/JuliaGPU/Adapt.jl) before solving:
+# A `CGNR` solver is moved to the GPU with [Adapt.jl](https://github.com/JuliaGPU/Adapt.jl) before solving. We construct it on the CPU and adapt it:
 using Adapt
 cpu_solver = createLinearSolver(CGNR, Array(A); reg = L2Regularization(0.0001), iterations=32);
 gpu_solver = Adapt.adapt(gpu, cpu_solver)
-x_adapted = solve!(gpu_solver, b)
-isapprox(Array(x_adapted), x_cpu)
+x_approx = solve!(gpu_solver, b)
 
-# Each operator of the solver must support Adapt.jl. Other solvers do not support `Adapt.adapt` yet.
+# To compare with the CPU result, we solve with the CPU solver and CPU data:
+x_cpu = solve!(cpu_solver, Array(b))
+isapprox(Array(x_approx), x_cpu)
+
+# `CGNR` does not change its backend based on the measurement vector. If its operators, its state, `b` or an array-valued `x0` live on different backends,
+# `solve!` throws an `ArgumentError` before modifying the solver, for example when the CPU solver receives a GPU `b`. A matrix of measurements is solved
+# with one state per column on the solver's backend:
+B = A * gpu(rand(Float32, 16, 3))
+X_approx = solve!(gpu_solver, B)
+isapprox(Array(X_approx[:, 1]), solve!(cpu_solver, Array(B[:, 1])))
+
+# Each operator of the solver must support Adapt.jl. Other solvers do not support `Adapt.adapt` yet and adapt their states based on the type of the given measurement vector;
+# for them, construct the solver from operators that already live on the GPU, as shown below.
 
 # ## Matrix-Free Operators
 # A special case is the usage of matrix-free operators. Since these operators do not have a concrete matrix representation, their GPU support depends on their implementation.

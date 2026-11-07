@@ -9,5 +9,6 @@ include("ProxL21.jl")
 include("ProxLLR.jl")
 include("NormalizedRegularization.jl")
 include("Kaczmarz.jl")
+include("CGNR.jl")
 
 end

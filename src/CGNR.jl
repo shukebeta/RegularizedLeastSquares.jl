@@ -48,6 +48,10 @@ creates an `CGNR` object for the forward operator `A` or normal operator `AHA`.
 adapts the operators, regularization and state of the solver to `target` (e.g. `CuArray`). Adapt the solver to the
 target backend before solving; each operator must support Adapt.jl. Only `CGNR` supports `Adapt.adapt` so far.
 
+`CGNR` does not change its backend implicitly. If its operators, its state, `b` or an array-valued `x0` live on
+different backends, `init!` and `solve!` throw an `ArgumentError` before modifying the solver. Views of arrays on
+the solver's backend are accepted. A matrix `b` is solved with one state per column on the solver's backend.
+
 See also [`createLinearSolver`](@ref), [`solve!`](@ref).
 """
 CGNR(; AHA, kwargs...) = CGNR(nothing; AHA = AHA, kwargs...)
@@ -95,15 +99,55 @@ function CGNR(A
   return CGNR(A, AHA, L2, other, normalizeReg, iterations, state)
 end
 
-function init!(solver::CGNR, state::CGNRState{T, Tc, vecTc}, b::otherTc; kwargs...) where {T, Tc, vecTc, otherTc <: AbstractVector{Tc}}
-  x = similar(b, size(state.x)...)
-  x₀ = similar(b, size(state.x₀)...)
-  pl = similar(b, size(state.pl)...)
-  vl = similar(b, size(state.vl)...)
+# Backend of an array: wrappers such as views use the backend of their parent, host arrays are `:CPU`.
+# The GPUArrays extension identifies GPU arrays by their array type, e.g. `JLArray`.
+cgnrBackend(x::AbstractArray) = parent(x) === x ? cgnrBackend(typeof(x)) : cgnrBackend(parent(x))
+cgnrBackend(::Type) = :CPU
+# Sparse arrays keep their entries in arrays of their backend, also those outside the GPUArrays hierarchy such as
+# CUDA.jl 5's `CuSparseVector`
+function cgnrBackend(S::Type{<:AbstractSparseArray})
+  for F in fieldtypes(Base.unwrap_unionall(S))
+    F isa Union{DataType, UnionAll} && F <: AbstractArray || continue
+    backend = cgnrBackend(Base.typename(F).wrapper)
+    backend == :CPU || return backend
+  end
+  return :CPU
+end
 
-  state = CGNRState(x, x₀, pl, vl, state.αl, state.βl, state.ζl, state.iteration, state.relTol, state.z0)
-  solver.state = state
-  init!(solver, state, b; kwargs...)
+cgnrOperatorBackend(::Nothing) = nothing
+cgnrOperatorBackend(op::AbstractArray) = cgnrBackend(op)
+cgnrOperatorBackend(op) = applicable(LinearOperators.storage_type, op) ? cgnrBackend(LinearOperators.storage_type(op)) : nothing
+
+cgnrStateBackend(state::CGNRState) = cgnrBackend(state.x)
+cgnrStateBackend(state::AbstractMatrixSolverState) = cgnrStateBackend(first(state.states))
+
+# CGNR does not change backends implicitly, so the operators, the state, `b` and an array-valued `x0` must share
+# one backend. This is checked before `init!` modifies the solver.
+function checkCGNRBackend(solver::CGNR, state, b, x0)
+  backend = cgnrStateBackend(state)
+  for (name, op) in (("A", solver.A), ("AHA", solver.AHA))
+    found = cgnrOperatorBackend(op)
+    isnothing(found) || found == backend || throw(ArgumentError("cannot initialize CGNR: operator $name is on backend $found " *
+      "but the solver state is on backend $backend. Construct the solver on one backend and move it with `Adapt.adapt(target, solver)`"))
+  end
+  for (name, data) in (("b", b), ("x0", x0))
+    data isa AbstractArray || continue
+    found = cgnrBackend(data)
+    found == backend || throw(ArgumentError("cannot initialize CGNR: $name is on backend $found but the solver state is on " *
+      "backend $backend. CGNR does not change backends implicitly; move the solver with `Adapt.adapt(target, solver)` " *
+      "or pass $name on the solver's backend"))
+  end
+  return nothing
+end
+
+# A matrix `b` and a later vector `b` replace `solver.state`, so they are checked before the generic methods run
+function init!(solver::CGNR, state::AbstractSolverState, b::AbstractMatrix; x0 = 0, kwargs...)
+  checkCGNRBackend(solver, state, b, x0)
+  invoke(init!, Tuple{AbstractLinearSolver, AbstractSolverState, AbstractMatrix}, solver, state, b; x0, kwargs...)
+end
+function init!(solver::CGNR, state::AbstractMatrixSolverState, b::AbstractVector; x0 = 0, kwargs...)
+  checkCGNRBackend(solver, state, b, x0)
+  invoke(init!, Tuple{AbstractLinearSolver, AbstractMatrixSolverState, AbstractVector}, solver, state, b; x0, kwargs...)
 end
 
 """
@@ -111,7 +155,8 @@ end
 
 (re-) initializes the CGNR iterator
 """
-function init!(solver::CGNR, state::CGNRState{T, Tc, vecTc}, b::vecTc; x0 = 0) where {T, Tc <: Union{T, Complex{T}}, vecTc<:AbstractVector{Tc}}
+function init!(solver::CGNR, state::CGNRState{T, Tc}, b::AbstractVector{Tc}; x0 = 0) where {T, Tc <: Union{T, Complex{T}}}
+  checkCGNRBackend(solver, state, b, x0)
   state.pl .= 0     #temporary vector
   state.vl .= 0     #temporary vector
   state.αl  = 0     #temporary scalar
