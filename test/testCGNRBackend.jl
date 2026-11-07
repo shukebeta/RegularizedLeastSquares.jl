@@ -131,37 +131,55 @@ function testCGNRBackendRejects(target)
   end
 end
 
-# Operator whose storage type is a GPU sparse vector
-struct SparseStorageOp{T} <: LOB.AbstractLinearOperator{T}
+# Operator with the storage type `S`
+struct StorageOp{T, S} <: LOB.AbstractLinearOperator{T}
   nrow::Int
   ncol::Int
 end
-LOB.storage_type(::SparseStorageOp{T}) where T = JLSparseVector{T, Int}
-Base.size(op::SparseStorageOp) = (op.nrow, op.ncol)
+LOB.storage_type(::StorageOp{T, S}) where {T, S} = S
+Base.size(op::StorageOp) = (op.nrow, op.ncol)
 
-function testCGNRBackendSparse()
+# Device sparse arrays outside the GPUArrays hierarchy, laid out like CUDA.jl 5's CuSparseVector and CuSparseMatrixCSC
+struct LegacySparseVector{Tv, Ti} <: SparseArrays.AbstractSparseVector{Tv, Ti}
+  iPtr::JLArray{Ti, 1}
+  nzVal::JLArray{Tv, 1}
+  len::Int
+end
+LegacySparseVector(v::SparseVector) = LegacySparseVector(JLArray(v.nzind), JLArray(v.nzval), length(v))
+Base.size(v::LegacySparseVector) = (v.len,)
+struct LegacySparseMatrixCSC{Tv, Ti} <: SparseArrays.AbstractSparseMatrix{Tv, Ti}
+  colPtr::JLArray{Ti, 1}
+  rowVal::JLArray{Ti, 1}
+  nzVal::JLArray{Tv, 1}
+  dims::NTuple{2, Int}
+end
+LegacySparseMatrixCSC(A::SparseMatrixCSC) = LegacySparseMatrixCSC(JLArray(A.colptr), JLArray(A.rowval), JLArray(A.nzval), size(A))
+Base.size(A::LegacySparseMatrixCSC) = A.dims
+
+# Sparse arrays on the backend of `target`, built by `spvec`/`spmat`, with `S` as an operator storage type
+function testCGNRBackendSparse(target, spvec, spmat, S)
   A, B, x0 = backendFixture(Float32)
   b = B[:, 1]
-  cpu, dev = backendTag(zeros(Float32, 1)), backendTag(JLArray(zeros(Float32, 1)))
-  @test backendTag(JLSparseVector(sparsevec(b))) == backendTag(JLSparseMatrixCSC(sparse(A))) == dev
-  @test backendTag(JLSparseVector{Float32, Int}) == backendTag(JLArray{Float32, 1}) == dev
+  cpu, dev = backendTag(zeros(Float32, 1)), backendTag(target(zeros(Float32, 1)))
+  @test backendTag(spvec(sparsevec(b))) == backendTag(spmat(sparse(A))) == backendTag(S) == dev
+  @test backendTag(sparsevec(b)) == backendTag(sparse(A)) == cpu
 
   # device sparse data or operators with a CPU state
   solver = backendSolver(A)
-  checkRejected(() -> init!(solver, JLSparseVector(sparsevec(b))), solver, "b is on backend $dev", cpu)
-  checkRejected(() -> init!(solver, JLSparseMatrixCSC(sparse(B))), solver, "b is on backend $dev", cpu)
-  for op in (JLSparseMatrixCSC(sparse(A)), SparseStorageOp{Float32}(size(A)...))
+  checkRejected(() -> init!(solver, spvec(sparsevec(b))), solver, "b is on backend $dev", cpu)
+  checkRejected(() -> init!(solver, spmat(sparse(B))), solver, "b is on backend $dev", cpu)
+  for op in (spmat(sparse(A)), StorageOp{Float32, S}(size(A)...))
     solver = CGNR(op; AHA = A' * A, iterations = 6)
-    for rhs in (b, JLArray(b))
+    for rhs in (b, target(b))
       checkRejected(() -> init!(solver, rhs), solver, "operator A is on backend $dev", cpu)
     end
     checkRejected(() -> init!(solver, B), solver, "operator A is on backend $dev", cpu)
   end
 
-  # device sparse data matches a device solver; JLArrays has no sparse mul!, so only the check is run
-  solver = Adapt.adapt(JLArray, backendSolver(A))
-  @test isnothing(RLS.checkCGNRBackend(solver, solver.state, JLSparseVector(sparsevec(b)), 0))
-  @test isnothing(RLS.checkCGNRBackend(solver, solver.state, JLArray(b), JLSparseVector(sparsevec(x0))))
+  # device sparse data matches a device solver; only the check is run, as not every backend has sparse mul!
+  solver = Adapt.adapt(target, backendSolver(A))
+  @test isnothing(RLS.checkCGNRBackend(solver, solver.state, spvec(sparsevec(b)), 0))
+  @test isnothing(RLS.checkCGNRBackend(solver, solver.state, target(b), spvec(sparsevec(x0))))
 end
 
 function testCGNRBackendFrames(target, scheduler)
@@ -213,8 +231,21 @@ end
       @testset "frames $scheduler" begin testCGNRBackendFrames(backendTarget, scheduler) end
     end
   end
-  # GPU sparse arrays need GPUArrays/JLArrays releases with sparse support
-  if arrayType === Array && isdefined(JLArrays, :JLSparseVector)
-    @testset "sparse" begin testCGNRBackendSparse() end
+  if arrayType === Array
+    @testset "sparse outside GPUArrays" begin
+      testCGNRBackendSparse(JLArray, LegacySparseVector, LegacySparseMatrixCSC, LegacySparseVector{Float32, Int})
+    end
+    # GPUArrays sparse arrays need GPUArrays/JLArrays releases with sparse support
+    if isdefined(JLArrays, :JLSparseVector)
+      @testset "GPUArrays sparse" begin
+        testCGNRBackendSparse(JLArray, JLSparseVector, JLSparseMatrixCSC, JLSparseVector{Float32, Int})
+      end
+    end
+  end
+  if isdefined(@__MODULE__, :CUDA) && arrayType === CUDA.CuArray
+    @testset "CUDA sparse" begin
+      CS = CUDA.CUSPARSE
+      testCGNRBackendSparse(CUDA.CuArray, CS.CuSparseVector, CS.CuSparseMatrixCSC, CS.CuSparseVector{Float32, Int32})
+    end
   end
 end

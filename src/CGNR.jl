@@ -133,11 +133,22 @@ end
 
 # Backend tag of an array, looking through wrappers such as views, reshapes and adjoints to the array that
 # owns the memory. Host arrays (dense, sparse, ranges, ...) are `:CPU`; the GPUArrays extension returns the
-# KernelAbstractions backend of dense and sparse GPU arrays.
+# KernelAbstractions backend of GPU arrays.
 cgnrBackend(x::AbstractArray) = cgnrArrayBackend(baseArray(x))
 cgnrArrayBackend(::AbstractArray) = :CPU
+cgnrArrayBackend(x::AbstractSparseArray) = cgnrBackend(typeof(x))
 # Backend tag of an operator storage type; the GPUArrays extension handles GPU storage types.
 cgnrBackend(::Type) = :CPU
+# Sparse arrays keep their entries in arrays of their backend, also those outside the GPUArrays hierarchy such
+# as CUDA.jl's `CuSparseVector`; the first such array that is not on the host determines the backend.
+function cgnrBackend(S::Type{<:AbstractSparseArray})
+  for F in fieldtypes(Base.unwrap_unionall(S))
+    F isa Union{DataType, UnionAll} && F <: AbstractArray || continue
+    found = cgnrBackend(Base.typename(F).wrapper)
+    found == :CPU || return found
+  end
+  return :CPU
+end
 
 cgnrOperatorBackend(::Nothing) = nothing
 cgnrOperatorBackend(op::AbstractArray) = cgnrBackend(op)
