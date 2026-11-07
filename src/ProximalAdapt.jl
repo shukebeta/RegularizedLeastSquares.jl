@@ -75,16 +75,36 @@ adaptState(ctx::CGNRAdaptContext, state::ProximalState) = mapStateArrays((v, f) 
 
 proximalBackendError(solver, msg) = throw(ArgumentError("cannot initialize $(nameof(typeof(solver))): $msg"))
 
-# Checks that the operators, every state buffer, `b` and an array-valued `x0` share one backend, using CGNR's backend
-# tags. It runs before `init!` modifies the solver, so a failed call leaves buffers, progress, regularization terms,
-# frame layout and `solver.state` unchanged.
+# Backend tag of an array for FISTA, OptISTA and POGM: CGNR's tag, except that a dense array other than `Array` that
+# CGNR tags `:CPU` but whose memory host code cannot address, e.g. Reactant's concrete arrays, is tagged by its array
+# type. Host dense arrays such as `SharedArray` provide a pointer and stay `:CPU`.
+function proximalBackend(x::AbstractArray)
+  tag = cgnrBackend(x)
+  base = baseArray(x)
+  (tag === :CPU && base isa DenseArray && !(base isa Array) && !hostAddressable(base)) || return tag
+  return Base.typename(typeof(base)).wrapper
+end
+proximalOperatorBackend(op::AbstractArray) = proximalBackend(op)
+proximalOperatorBackend(op) = cgnrOperatorBackend(op)
+# Base's fallback for arrays without host memory throws an ErrorException ("conversion to pointer not defined").
+hostAddressable(x::DenseArray{T}) where T = try
+  Base.unsafe_convert(Ptr{T}, Base.cconvert(Ptr{T}, x))
+  true
+catch e
+  e isa ErrorException || rethrow()
+  false
+end
+
+# Checks that the operators, every state buffer, `b` and an array-valued `x0` share one backend. It runs before
+# `init!` modifies the solver, so a failed call leaves buffers, progress, regularization terms, frame layout and
+# `solver.state` unchanged.
 function checkProximalBackend(solver::ProximalSolver, state, b, x0)
   name = nameof(typeof(solver))
   backend = nothing
   for s in leafStates(state), f in fieldnames(typeof(s))
     v = getfield(s, f)
     v isa AbstractArray || continue
-    found = cgnrBackend(v)
+    found = proximalBackend(v)
     if isnothing(backend)
       backend = found
     elseif found != backend
@@ -94,13 +114,13 @@ function checkProximalBackend(solver::ProximalSolver, state, b, x0)
   end
   isnothing(backend) && proximalBackendError(solver, "the solver state $(typeof(state)) contains no state vectors")
   for (opname, op) in (("A", solver.A), ("AHA", solver.AHA))
-    found = cgnrOperatorBackend(op)
+    found = proximalOperatorBackend(op)
     isnothing(found) || found == backend || proximalBackendError(solver, "operator $opname is on backend $found but the " *
       "solver state is on backend $backend. Construct the solver on one backend and move it with `Adapt.adapt(target, solver)`")
   end
   for (what, v) in (("b", b), ("x0", x0))
     v isa AbstractArray || continue
-    found = cgnrBackend(v)
+    found = proximalBackend(v)
     found == backend || proximalBackendError(solver, "$what is on backend $found but the solver state is on backend " *
       "$backend. $name does not change backends implicitly; move the solver with `Adapt.adapt(target, solver)` or pass " *
       "$what on the solver's backend")

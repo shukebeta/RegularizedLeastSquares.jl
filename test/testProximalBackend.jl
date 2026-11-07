@@ -167,13 +167,20 @@ function proxMixedState(s::ST, x) where ST
   return Base.typename(ST).wrapper{real(T), AbstractVector{T}}((f === :x ? x : getfield(s, f) for f in fieldnames(ST))...)
 end
 
-# A dense vector type outside `Array` and GPUArrays whose memory host BLAS cannot use, as Reactant's concrete arrays
+# Dense vector types outside `Array` and GPUArrays: one whose memory host BLAS cannot address, as Reactant's concrete
+# arrays, and a host one that provides a pointer, as `SharedArray`
 struct ProxForeignVector{T} <: DenseVector{T}
   data::Vector{T}
 end
-Base.size(v::ProxForeignVector) = size(v.data)
-Base.getindex(v::ProxForeignVector, i::Int) = v.data[i]
-Base.setindex!(v::ProxForeignVector, x, i::Int) = (v.data[i] = x)
+struct ProxHostVector{T} <: DenseVector{T}
+  data::Vector{T}
+end
+for V in (ProxForeignVector, ProxHostVector)
+  @eval Base.size(v::$V) = size(v.data)
+  @eval Base.getindex(v::$V, i::Int) = v.data[i]
+  @eval Base.setindex!(v::$V, x, i::Int) = (v.data[i] = x)
+end
+Base.unsafe_convert(::Type{Ptr{T}}, v::ProxHostVector{T}) where T = Base.unsafe_convert(Ptr{T}, v.data)
 
 function testProximalBackendRejects(S, target)
   A, B, x0 = proxFixture(ComplexF32)
@@ -197,12 +204,13 @@ function testProximalBackendRejects(S, target)
     end
   end
 
-  # dense arrays of other array types are not host arrays, even outside GPUArrays
+  # dense arrays outside GPUArrays without host memory are rejected by CPU solvers; host dense arrays are accepted
+  # (`testProximalHostDense`), and CGNR's tags are unchanged
   solver = proxSolver(S, A)
-  @test proxTag(ProxForeignVector(b)) != cpu
+  @test PRLS.proximalBackend(ProxForeignVector(b)) == ProxForeignVector && PRLS.cgnrBackend(ProxForeignVector(b)) == cpu
   proxRejected(() -> init!(solver, ProxForeignVector(copy(b))), solver, "b is on backend ProxForeignVector", cpu)
+  proxRejected(() -> solve!(solver, ProxForeignVector(copy(b))), solver, "b is on backend ProxForeignVector", cpu)
   proxRejected(() -> init!(solver, b; x0 = ProxForeignVector(copy(x0))), solver, "x0 is on backend ProxForeignVector", cpu)
-  @test_throws ArgumentError init!(CGNR(A; iterations = 2), ProxForeignVector(copy(b))) # the tags are CGNR's
 
   # operators on another backend than the (default CPU) state, even if b matches the state: the implicit switch of
   # a solver constructed from GPU operators is no longer taken
@@ -226,6 +234,17 @@ function testProximalBackendRejects(S, target)
   solver.state = SequentialState(PRLS.AbstractSolverState{S}[devState, cpuState])
   proxRejected(() -> init!(solver, target(b)), solver, "mixes backends", name)
   proxRejected(() -> init!(solver, target(B)), solver, "mixes backends", name)
+end
+
+# A host dense array type other than `Array` works as `b` and `x0` like a `Vector`, for the family and for CGNR
+function testProximalHostDense(S)
+  A, B, x0 = proxFixture(ComplexF32)
+  b = B[:, 1]
+  @test PRLS.proximalBackend(ProxHostVector(b)) == PRLS.cgnrBackend(ProxHostVector(b)) == :CPU
+  xref = solve!(proxSolver(S, A), b; x0)
+  @test proxClose(solve!(proxSolver(S, A), ProxHostVector(copy(b)); x0 = ProxHostVector(copy(x0))), xref)
+  cgnr() = CGNR(A; reg = L2Regularization(0.1f0), iterations = 4)
+  @test proxClose(solve!(cgnr(), ProxHostVector(copy(b))), solve!(cgnr(), b))
 end
 
 # Explicitly adapted solvers keep their frame layout: vector -> matrix -> vector, compared with CPU solvers
@@ -277,6 +296,7 @@ end
     end
     if arrayType === Array
       @testset "element types" begin testProximalNumeric(S) end
+      @testset "host dense arrays" begin testProximalHostDense(S) end
     end
   end
 end
