@@ -175,12 +175,17 @@ end
 struct ProxHostVector{T} <: DenseVector{T}
   data::Vector{T}
 end
-for V in (ProxForeignVector, ProxHostVector)
+# and one whose pointer conversion fails for another reason, which must not be mistaken for a missing host pointer
+struct ProxFailingVector{T} <: DenseVector{T}
+  data::Vector{T}
+end
+for V in (ProxForeignVector, ProxHostVector, ProxFailingVector)
   @eval Base.size(v::$V) = size(v.data)
   @eval Base.getindex(v::$V, i::Int) = v.data[i]
   @eval Base.setindex!(v::$V, x, i::Int) = (v.data[i] = x)
 end
 Base.unsafe_convert(::Type{Ptr{T}}, v::ProxHostVector{T}) where T = Base.unsafe_convert(Ptr{T}, v.data)
+Base.unsafe_convert(::Type{Ptr{T}}, v::ProxFailingVector{T}) where T = error("pointer conversion failed")
 
 function testProximalBackendRejects(S, target)
   A, B, x0 = proxFixture(ComplexF32)
@@ -211,6 +216,10 @@ function testProximalBackendRejects(S, target)
   proxRejected(() -> init!(solver, ProxForeignVector(copy(b))), solver, "b is on backend ProxForeignVector", cpu)
   proxRejected(() -> solve!(solver, ProxForeignVector(copy(b))), solver, "b is on backend ProxForeignVector", cpu)
   proxRejected(() -> init!(solver, b; x0 = ProxForeignVector(copy(x0))), solver, "x0 is on backend ProxForeignVector", cpu)
+  for call in (() -> init!(solver, ProxFailingVector(copy(b))), () -> init!(solver, b; x0 = ProxFailingVector(copy(x0))))
+    err = try call(); nothing catch e; e end
+    @test err isa ErrorException && err.msg == "pointer conversion failed"
+  end
 
   # operators on another backend than the (default CPU) state, even if b matches the state: the implicit switch of
   # a solver constructed from GPU operators is no longer taken

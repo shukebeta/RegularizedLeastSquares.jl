@@ -86,13 +86,16 @@ function proximalBackend(x::AbstractArray)
 end
 proximalOperatorBackend(op::AbstractArray) = proximalBackend(op)
 proximalOperatorBackend(op) = cgnrOperatorBackend(op)
-# Base's fallback for arrays without host memory throws an ErrorException ("conversion to pointer not defined").
-hostAddressable(x::DenseArray{T}) where T = try
-  Base.unsafe_convert(Ptr{T}, Base.cconvert(Ptr{T}, x))
-  true
-catch e
-  e isa ErrorException || rethrow()
-  false
+# Only Base's fallback for arrays without host memory counts as unaddressable; any other error propagates.
+function hostAddressable(x::DenseArray{T}) where T
+  c = Base.cconvert(Ptr{T}, x)
+  try
+    Base.unsafe_convert(Ptr{T}, c)
+  catch e
+    e isa ErrorException && e.msg == "conversion to pointer not defined for $(typeof(c))" && return false
+    rethrow()
+  end
+  return true
 end
 
 # Checks that the operators, every state buffer, `b` and an array-valued `x0` share one backend. It runs before
