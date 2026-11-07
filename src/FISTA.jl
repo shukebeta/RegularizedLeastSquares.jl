@@ -53,6 +53,18 @@ creates a `FISTA` object for the forward operator `A` or normal operator `AHA`.
 For a LinearOperatorCollection.jl operator `A`, the default `AHA = A'*A` is an opaque product; pass
 `AHA = normalOperator(A)` to move the solver to another array backend with [`Adapt.adapt`](@ref Adapt.adapt_structure(::Any, ::RegularizedLeastSquares.ProximalSolver)).
 
+# Backends
+
+`FISTA` does not change its backend implicitly. The constructor allocates its state on the CPU, so a solver built
+from GPU operators, or used with GPU data, must first be moved with `Adapt.adapt(target, solver)`. The operators,
+the state, `b` and an array-valued `x0` must share one backend, otherwise `init!` and `solve!` throw an
+`ArgumentError` before modifying the solver. Views and other wrappers of arrays on the solver's backend use the
+solver's existing buffers; a `b` of another element type on that backend, e.g. a complex `b` for a real solver,
+continues with state vectors of that element type.
+
+A matrix `b` creates one state per column, copied from the current state on the solver's backend, and runs them
+with the `scheduler` passed to `init!`/`solve!`; a later vector `b` reuses the state of the first column.
+
 See also [`createLinearSolver`](@ref), [`solve!`](@ref).
 """
 FISTA(; AHA, kwargs...) = FISTA(nothing; AHA = AHA, kwargs...)
@@ -94,23 +106,16 @@ function FISTA(A
   return FISTA(A, AHA, reg[1], other, normalizeReg, verbose, restart, iterations, state)
 end
 
-function init!(solver::FISTA, state::FISTAState{rT, vecT}, b::otherT; kwargs...) where {rT, vecT, otherT <: AbstractVector}
-  x = similar(b, size(state.x)...)
-  x₀ = similar(b, size(state.x₀)...)
-  xᵒˡᵈ = similar(b, size(state.xᵒˡᵈ)...)
-  res = similar(b, size(state.res)...)
-
-  state = FISTAState(x, x₀, xᵒˡᵈ, res, state.ρ, state.theta, state.theta, state.iteration, state.relTol, state.norm_x₀, state.rel_res_norm)
-  solver.state = state
-  init!(solver, state, b; kwargs...)
-end
+# `b` with another element type than the state, see `initPromoted!`
+init!(solver::FISTA, state::FISTAState{rT, vecT}, b::AbstractVector; kwargs...) where {rT, vecT} = initPromoted!(solver, state, b; kwargs...)
 
 """
     init!(it::FISTA, b; x0 = 0, theta = 1)
 
 (re-) initializes the FISTA iterator
 """
-function init!(solver::FISTA, state::FISTAState{rT, vecT}, b::vecT; x0 = 0, theta=1) where {rT, vecT <: AbstractVector}
+function init!(solver::FISTA, state::FISTAState{rT, vecT}, b::AbstractVector{T}; x0 = 0, theta=1) where {rT, T, vecT <: AbstractVector{T}}
+  checkProximalBackend(solver, state, b, x0)
   if solver.A === nothing
     state.x₀ .= b
   else

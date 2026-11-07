@@ -56,6 +56,10 @@ for _ in 1:5
   iterate(gpu_fista)
 end
 solversolution(gpu_fista);
+# Like `CGNR`, these solvers do not change backends on their own: if their operators, their state, `b` or an array-valued `x0` live on different backends,
+# `init!` and `solve!` throw an `ArgumentError` before modifying the solver. This includes a solver constructed from GPU operators, whose state is
+# allocated on the CPU, so move it with `Adapt.adapt` first. Views of arrays on the solver's backend are accepted, and a matrix `b` creates one state
+# per column on the solver's backend that a later vector `b` reuses, as for `CGNR`.
 # For a LinearOperatorCollection.jl operator `A`, these solvers default to the opaque product `AHA = A' * A`, which cannot be moved;
 # construct them with `AHA = normalOperator(A)` instead.
 
@@ -107,10 +111,12 @@ LinearOperators.storage_type(A)
 # Afterwards we can use the operator as usual:
 b = A*vec(gpu(image));
 
-# And use it in the solver:
+# And use it in the solver. `FISTA` allocates its state on the CPU and does not change backends on its own, so we construct it with the normal operator
+# `normalOperator(A)`, which Adapt.jl can move, and move the solver to the GPU before solving:
 using RegularizedLeastSquares
 reg = TVRegularization(0.01; shape=size(image))
-solver = createLinearSolver(FISTA, A; reg=reg, iterations=20)
+solver = createLinearSolver(FISTA, A; AHA=normalOperator(A), reg=reg, iterations=20)
+solver = Adapt.adapt(gpu, solver)
 img_approx = solve!(solver,b);
 
 # To visualize the reconstructed image, we need to reshape the result vector to the correct shape and convert it to a CPU array:

@@ -10,8 +10,8 @@ function testRealLinearSolver(; arrayType=Array, elType=Float32)
     @testset for solver in solvers
         @test try
             S = createLinearSolver(solver, arrayType(A), iterations=200)
-            # CGNR does not switch backends implicitly
-            solver <: CGNR && (S = Adapt.adapt(arrayType, S))
+            # CGNR, FISTA, OptISTA and POGM do not switch backends implicitly
+            solver <: Union{CGNR, FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
             x_approx = Array(solve!(S, arrayType(b)))
             @info "Testing solver $solver: $x ≈ $x_approx"
             @test x_approx ≈ x rtol = 0.1
@@ -37,8 +37,8 @@ function testComplexLinearSolver(; arrayType=Array, elType=Float32)
     @testset for solver in solvers
         @test try
             S = createLinearSolver(solver, arrayType(A), iterations=100)
-            # CGNR does not switch backends implicitly
-            solver <: CGNR && (S = Adapt.adapt(arrayType, S))
+            # CGNR, FISTA, OptISTA and POGM do not switch backends implicitly
+            solver <: Union{CGNR, FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
             x_approx = Array(solve!(S, arrayType(b)))
             @info "Testing solver $solver: $x ≈ $x_approx"
             @test x_approx ≈ x rtol = 0.1
@@ -65,8 +65,8 @@ function testComplexLinearAHASolver(; arrayType=Array, elType=Float32)
     @testset for solver in solvers
         @test try
             S = createLinearSolver(solver, nothing; AHA=arrayType(AHA), iterations=100)
-            # CGNR does not switch backends implicitly
-            solver <: CGNR && (S = Adapt.adapt(arrayType, S))
+            # CGNR, FISTA, OptISTA and POGM do not switch backends implicitly
+            solver <: Union{CGNR, FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
             x_approx = Array(solve!(S, arrayType(b)))
             @info "Testing solver $solver: $x ≈ $x_approx"
             @test x_approx ≈ x rtol = 0.1
@@ -107,6 +107,8 @@ function testConvexLinearSolver(; arrayType=Array, elType=Float32)
             iterations=200,
             normalizeReg=NoNormalization(),
         )
+        # FISTA, OptISTA and POGM do not switch backends implicitly
+        solver <: Union{FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
         x_approx = Array(solve!(S, b))
         @info "Testing solver $solver w/o restart: relative error = $(norm(x - x_approx) / norm(x))"
         @test x ≈ x_approx rtol = 0.1
@@ -121,6 +123,7 @@ function testConvexLinearSolver(; arrayType=Array, elType=Float32)
                 normalizeReg=NoNormalization(),
                 restart=:gradient,
             )
+            S = Adapt.adapt(arrayType, S)
             x_approx = Array(solve!(S, b))
             @info "Testing solver $solver w/ gradient restart: relative error = $(norm(x - x_approx) / norm(x))"
             @test x ≈ x_approx rtol = 0.1
@@ -136,6 +139,7 @@ function testConvexLinearSolver(; arrayType=Array, elType=Float32)
             iterations=200,
             normalizeReg=MeasurementBasedNormalization(),
         )
+        solver <: Union{FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
         x_approx = Array(solve!(S, b))
         x_approx .*= scale_F
         @info "Testing solver $solver w/o restart and after re-scaling: relative error = $(norm(x - x_approx) / norm(x))"

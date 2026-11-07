@@ -66,3 +66,74 @@ adaptState(ctx::CGNRAdaptContext, state::S) where S <: ProximalState = Base.type
   v = getfield(state, f)
   v isa AbstractArray{<:Number} ? adaptVector(ctx, v, "state.$f") : v
 end...)
+
+# Backends: FISTA, OptISTA and POGM never change backends implicitly
+
+proximalBackendError(solver, msg) = throw(ArgumentError("cannot initialize $(nameof(typeof(solver))): $msg"))
+
+# Checks that the operators, every state buffer, `b` and an array-valued `x0` share one backend, using CGNR's backend
+# tags. It runs before `init!` modifies the solver, so a failed call leaves buffers, progress, regularization terms,
+# frame layout and `solver.state` unchanged.
+function checkProximalBackend(solver::ProximalSolver, state, b, x0)
+  name = nameof(typeof(solver))
+  backend = nothing
+  for s in leafStates(state), f in fieldnames(typeof(s))
+    v = getfield(s, f)
+    v isa AbstractArray || continue
+    found = cgnrBackend(v)
+    if isnothing(backend)
+      backend = found
+    elseif found != backend
+      proximalBackendError(solver, "the solver state mixes backends $backend and $found; construct the solver on one " *
+        "backend and move it with `Adapt.adapt(target, solver)`")
+    end
+  end
+  isnothing(backend) && proximalBackendError(solver, "the solver state $(typeof(state)) contains no state vectors")
+  for (opname, op) in (("A", solver.A), ("AHA", solver.AHA))
+    found = cgnrOperatorBackend(op)
+    isnothing(found) || found == backend || proximalBackendError(solver, "operator $opname is on backend $found but the " *
+      "solver state is on backend $backend. Construct the solver on one backend and move it with `Adapt.adapt(target, solver)`")
+  end
+  for (what, v) in (("b", b), ("x0", x0))
+    v isa AbstractArray || continue
+    found = cgnrBackend(v)
+    found == backend || proximalBackendError(solver, "$what is on backend $found but the solver state is on backend " *
+      "$backend. $name does not change backends implicitly; move the solver with `Adapt.adapt(target, solver)` or pass " *
+      "$what on the solver's backend")
+  end
+  return nothing
+end
+
+# A copy of `state` whose vectors have element type `T` and live on the state's backend, for a `b` of another element
+# type (e.g. a complex `b` for a real solver). Scalars and counters are kept; `init!` resets them. Element types that
+# the state type does not allow, e.g. `Float64` vectors with `Float32` scalars, throw here, before the solver changes.
+promoteState(state::S, ::Type{T}) where {S <: ProximalState, T} = Base.typename(S).wrapper(map(fieldnames(S)) do f
+  v = getfield(state, f)
+  v isa AbstractArray{<:Number} ? similar(v, T, size(v)) : v
+end...)
+matchingState(state, b) = eltype(state.x) == eltype(b) ? state : promoteState(state, eltype(b))
+
+# `b` with another element type than the state: continue with a promoted state on the solver's backend. Arrays with the
+# state's element type, including views, dispatch to the algorithms' own methods and use the existing buffers.
+# Each algorithm forwards its fallback `init!` method for vectors here.
+function initPromoted!(solver::ProximalSolver, state::ProximalState, b::AbstractVector; kwargs...)
+  checkProximalBackend(solver, state, b, get(kwargs, :x0, 0))
+  state = promoteState(state, eltype(b))
+  solver.state = state
+  init!(solver, state, b; kwargs...)
+end
+
+# Frame transitions replace `solver.state`, so they are checked, and states of another element type are promoted,
+# before anything changes. A matrix `b` copies the (promoted) current state once per column.
+function init!(solver::ProximalSolver, state::AbstractSolverState, b::AbstractMatrix; x0 = 0, kwargs...)
+  checkProximalBackend(solver, state, b, x0)
+  template = matchingState(first(leafStates(state)), b)
+  invoke(init!, Tuple{AbstractLinearSolver, AbstractSolverState, AbstractMatrix}, solver, template, b; x0, kwargs...)
+end
+# A vector `b` after a matrix continues with the state of the first column.
+function init!(solver::ProximalSolver, state::AbstractMatrixSolverState, b::AbstractVector; x0 = 0, kwargs...)
+  checkProximalBackend(solver, state, b, x0)
+  single = matchingState(first(state.states), b)
+  solver.state = single
+  init!(solver, single, b; x0, kwargs...)
+end
