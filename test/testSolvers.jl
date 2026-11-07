@@ -10,6 +10,8 @@ function testRealLinearSolver(; arrayType=Array, elType=Float32)
     @testset for solver in solvers
         @test try
             S = createLinearSolver(solver, arrayType(A), iterations=200)
+            # CGNR does not switch backends implicitly
+            solver <: CGNR && (S = Adapt.adapt(arrayType, S))
             x_approx = Array(solve!(S, arrayType(b)))
             @info "Testing solver $solver: $x ≈ $x_approx"
             @test x_approx ≈ x rtol = 0.1
@@ -35,6 +37,8 @@ function testComplexLinearSolver(; arrayType=Array, elType=Float32)
     @testset for solver in solvers
         @test try
             S = createLinearSolver(solver, arrayType(A), iterations=100)
+            # CGNR does not switch backends implicitly
+            solver <: CGNR && (S = Adapt.adapt(arrayType, S))
             x_approx = Array(solve!(S, arrayType(b)))
             @info "Testing solver $solver: $x ≈ $x_approx"
             @test x_approx ≈ x rtol = 0.1
@@ -61,6 +65,8 @@ function testComplexLinearAHASolver(; arrayType=Array, elType=Float32)
     @testset for solver in solvers
         @test try
             S = createLinearSolver(solver, nothing; AHA=arrayType(AHA), iterations=100)
+            # CGNR does not switch backends implicitly
+            solver <: CGNR && (S = Adapt.adapt(arrayType, S))
             x_approx = Array(solve!(S, arrayType(b)))
             @info "Testing solver $solver: $x ≈ $x_approx"
             @test x_approx ≈ x rtol = 0.1
@@ -256,13 +262,13 @@ function testCGNRStartValue(; arrayType=Array, elType=Float64)
     x0 = randn(elType, 8)
     for λ in (zero(elType), elType(0.5))
         x_ls = (A' * A + λ * I) \ (A' * b)
-        S = createLinearSolver(CGNR, arrayType(A); reg=L2Regularization(λ), iterations=50)
+        S = Adapt.adapt(arrayType, createLinearSolver(CGNR, arrayType(A); reg=L2Regularization(λ), iterations=50))
         b_d = arrayType(b)
         x_approx = Array(solve!(S, b_d; x0=arrayType(x0)))
         @test x_approx ≈ x_ls rtol = sqrt(eps(elType))
         @test Array(b_d) == b
 
-        S = createLinearSolver(CGNR, nothing; AHA=arrayType(A' * A), reg=L2Regularization(λ), iterations=50)
+        S = Adapt.adapt(arrayType, createLinearSolver(CGNR, nothing; AHA=arrayType(A' * A), reg=L2Regularization(λ), iterations=50))
         x_approx = Array(solve!(S, arrayType(A' * b); x0=arrayType(x0)))
         @test x_approx ≈ x_ls rtol = sqrt(eps(elType))
 
