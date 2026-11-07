@@ -42,6 +42,11 @@ RegularizedLeastSquares.TransformedRegularization
 RegularizedLeastSquares.PlugAndPlayRegularization
 ```
 
+## Moving to another array backend
+```@docs
+RegularizedLeastSquares.Adapt.adapt_structure(::Any, ::RegularizedLeastSquares.AdaptableRegularization)
+```
+
 ## Miscellaneous Functions
 ```@docs
 RegularizedLeastSquares.prox!(::AbstractParameterizedRegularization, ::AbstractArray)

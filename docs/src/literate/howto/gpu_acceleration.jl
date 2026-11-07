@@ -36,6 +36,13 @@ isapprox(Array(x_adapted), x_cpu)
 # `LinearOperator`s, raise an `ArgumentError` instead of producing a solver that mixes backends.
 # Other solvers do not support `Adapt.adapt` yet; for them, construct the solver from operators that already live on the GPU, as shown below.
 
+# Regularization terms can be moved on their own, for example to pass them to a solver built from GPU operators.
+# `Adapt.adapt(gpu, reg)` rebuilds the built-in terms and wrappers with their effective state, such as an initialized
+# `AutoScaledRegularization` factor or the buffers of a `TVRegularization`, and shares no data with `reg`:
+reg = AutoScaledRegularization(L2Regularization(0.0001))
+gpu_reg = Adapt.adapt(gpu, reg)
+# Terms built on callables, such as `PlugAndPlayRegularization`, and transforms without an Adapt rule raise an `ArgumentError`.
+
 # ## Matrix-Free Operators
 # A special case is the usage of matrix-free operators. Since these operators do not have a concrete matrix representation, their GPU support depends on their implementation.
 # Since not all multiplications within a solver approximation are in-place, the operator also needs to support the `*` operation and construct an appropriate result vector.
