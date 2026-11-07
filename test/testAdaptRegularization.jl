@@ -100,8 +100,8 @@ function testRegAdaptTV(target, T)
   other = TVRegularization(0.05f0; shape, dims = 1:2, iterationsTV = 5)
   other.params = RegularizedLeastSquares.TVParams(zeros(T, prod(shape)); shape = (4, 3), dims = [1])
   foreach(((i, f),) -> fill!(getfield(other.params, f), T(i)), enumerate((:pq, :rs, :pqOld, :xTmp)))
+  fields = (:pq, :rs, :pqOld, :xTmp)
   for src in (initialized, other)
-    fields = (:pq, :rs, :pqOld, :xTmp)
     before = map(f -> copy(getfield(src.params, f)), fields)
     moved = Adapt.adapt(target, src)
     for (f, b) in zip(fields, before)
@@ -111,12 +111,33 @@ function testRegAdaptTV(target, T)
     ∇, ∇′ = src.params.∇, moved.params.∇
     @test ∇′ !== ∇ && isOn(∇′, target) && size(∇′) == size(∇)
     @test regApprox(Array(∇′ * target(x)), ∇ * x)
+    ∇state = gradState(∇)   # after the reference product above, which updates the source counters
     checkProx(src, target, x)
+    if target === Array   # round trip through another backend against an independent CPU reference
+      ref = prox!(deepcopy(src), copy(x))
+      back = Adapt.adapt(Array, Adapt.adapt(JLArray, src))
+      @test all(f -> getfield(back.params, f) isa Vector{T} && getfield(back.params, f) !== getfield(src.params, f), fields)
+      @test regApprox(prox!(back, copy(x)), ref)
+    end
     @test all(map((f, b) -> isequal(getfield(src.params, f), b), fields, before))   # source buffers untouched
+    @test isequal(gradState(∇), ∇state)   # source gradient counters and workspaces untouched
   end
   @test Adapt.adapt(target, initialized).dims !== initialized.dims
   @test Adapt.adapt(target, initialized.params) isa RegularizedLeastSquares.TVParams
+
+  # mutable host dims, including views, are copied
+  d = [1, 2]
+  viewDims = TVRegularization(0.1f0; shape = (2, 3), dims = view(d, 1:1))
+  movedView = Adapt.adapt(target, viewDims)
+  y = target(T[1, 2, 4, 8, 16, 32])
+  normBefore = norm(movedView, y)
+  @test movedView.dims !== viewDims.dims && movedView.dims == [1]
+  d[1] = 2
+  @test regApprox(norm(movedView, y), normBefore)
 end
+
+# Counters and workspaces of a gradient operator, which are mutated when it is applied
+gradState(∇) = map(p -> (v = getproperty(∇, p); v isa AbstractArray ? copy(v) : v), (:nprod, :ntprod, :nctprod, :tmp, :Mv, :Mtu))
 
 # Built-in terms run on the target without scalar indexing
 function testRegAdaptExecution(target, T)
@@ -149,24 +170,34 @@ function testRegAdaptExecution(target, T)
   @test_throws BoundsError norm(Adapt.adapt(target, L2Regularization(w[1:n-2])), target(x))
 end
 
+# The example of the Adapt.adapt docstring, with `target` in place of CuArray
+function testRegAdaptExample(target)
+  reg = AutoScaledRegularization(TransformedRegularization(L1Regularization(0.1f0), WeightingOp(rand(MersenneTwister(57), Float32, 1024))))
+  gpu_reg = Adapt.adapt(target, reg)
+  x = randn(MersenneTwister(58), Float32, 1024)
+  y = prox!(gpu_reg, target(x))
+  @test y isa target && regApprox(Array(y), prox!(deepcopy(reg), copy(x)))
+end
+
 function testRegAdaptErrors(target)
   n = 6
   D = randn(MersenneTwister(3), Float32, n, n)
-  message(f) = (err = try f(); nothing catch e; e end; err isa ArgumentError ? sprint(showerror, err) : repr(err))
+  # the rejection is an ArgumentError naming the offending component
+  rejects(f, needle) = try f(); false catch e; e isa ArgumentError && occursin(needle, sprint(showerror, e)) end
   mask = [true, false, true, true, false, false]
-  @test occursin("CustomRegTerm", message(() -> Adapt.adapt(target, MaskedRegularization(CustomRegTerm(), mask))))
-  @test occursin("ProjectionRegularization", message(() -> Adapt.adapt(target, MaskedRegularization(ProjectionRegularization(), mask))))
+  @test rejects(() -> Adapt.adapt(target, MaskedRegularization(CustomRegTerm(), mask)), "CustomRegTerm")
+  @test rejects(() -> Adapt.adapt(target, MaskedRegularization(ProjectionRegularization(), mask)), "ProjectionRegularization")
   opaque = AutoScaledRegularization(TransformedRegularization(L1Regularization(0.1f0), RegLO.LinearOperator(D)))
   trafo = opaque.reg.trafo
-  @test occursin("no Adapt rule", message(() -> Adapt.adapt(target, opaque)))
+  @test rejects(() -> Adapt.adapt(target, opaque), "no Adapt rule")
   @test isnothing(opaque.factor) && opaque.reg.trafo === trafo
-  @test occursin("transform of type", message(() -> Adapt.adapt(target, TransformedRegularization(L1Regularization(0.1f0), identity))))
+  @test rejects(() -> Adapt.adapt(target, TransformedRegularization(L1Regularization(0.1f0), identity)), "transform of type")
   for bad in (Int, AbstractArray, RegNoopAdaptor())
-    @test occursin("unsupported Adapt target", message(() -> Adapt.adapt(bad, L2Regularization(regWeights(n)))))
+    @test rejects(() -> Adapt.adapt(bad, L2Regularization(regWeights(n))), "unsupported Adapt target")
   end
   if target === JLArray
     w = regWeights(n)
-    @test occursin("element type", message(() -> Adapt.adapt(RegToFloat64Adaptor(), L2Regularization(w))))
+    @test rejects(() -> Adapt.adapt(RegToFloat64Adaptor(), L2Regularization(w)), "element type")
     @test w == regWeights(n)
   end
 end
@@ -180,6 +211,7 @@ end
         @testset "execution $T" begin testRegAdaptExecution(target, T) end
       end
       @testset "array factors" begin testRegAdaptFactors(target) end
+      @testset "docstring example" begin testRegAdaptExample(target) end
       @testset "errors" begin testRegAdaptErrors(target) end
     end
   end

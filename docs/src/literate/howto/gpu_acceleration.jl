@@ -41,7 +41,8 @@ isapprox(Array(x_adapted), x_cpu)
 # `AutoScaledRegularization` factor or the buffers of a `TVRegularization`, and shares no data with `reg`:
 reg = AutoScaledRegularization(L2Regularization(0.0001))
 gpu_reg = Adapt.adapt(gpu, reg)
-# Terms built on callables, such as `PlugAndPlayRegularization`, and transforms without an Adapt rule raise an `ArgumentError`.
+# Unsupported terms and transforms inside a supported term, such as a `PlugAndPlayRegularization` or a closure-based `LinearOperator`,
+# raise an `ArgumentError`. Adapting callable terms such as `PlugAndPlayRegularization` on their own is not supported yet.
 
 # ## Matrix-Free Operators
 # A special case is the usage of matrix-free operators. Since these operators do not have a concrete matrix representation, their GPU support depends on their implementation.

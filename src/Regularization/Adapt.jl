@@ -12,9 +12,9 @@ Return a copy of the regularization term `reg` whose numeric data lives on the b
 `Adapt.adapt(CuArray, reg)`. The source term is left untouched.
 
 ```julia
-reg = AutoScaledRegularization(TransformedRegularization(L1Regularization(0.1f0), WaveletOp(Float32, shape = (32, 32))))
+reg = AutoScaledRegularization(TransformedRegularization(L1Regularization(0.1f0), WeightingOp(rand(Float32, 1024))))
 gpu_reg = Adapt.adapt(CuArray, reg)
-prox!(gpu_reg, CuArray(randn(Float32, 32 * 32)))
+prox!(gpu_reg, CuArray(randn(Float32, 1024)))
 ```
 
 Nested terms are rebuilt as one graph: a transform that appears several times in `reg` is adapted into a single
@@ -27,9 +27,10 @@ and are copied, not moved.
 Supported are the `L1`, `L2` (including array-valued weights), `L21`, `Nuclear`, `LLR`, `Real` and `Positive` terms,
 `TVRegularization`, and the `Normalized`, `FixedScaled`, `FixedParameter`, `AutoScaled`, `Masked` and `Transformed`
 wrappers with dense or LinearOperatorCollection.jl transforms that support Adapt.jl. Immutable terms holding only
-scalars are backend-neutral and are returned as is. Other terms, such as `PlugAndPlayRegularization`,
-`ProjectionRegularization` or custom terms, and transforms without an Adapt rule, e.g. closure-based
-`LinearOperator`s, raise an `ArgumentError`, as do targets that do not move arrays or change element types.
+scalars are backend-neutral and are returned as is. Within a supported term, other terms (such as
+`PlugAndPlayRegularization`, `ProjectionRegularization` or custom terms) and transforms without an Adapt rule,
+e.g. closure-based `LinearOperator`s, raise an `ArgumentError`, as do targets that do not move arrays or change
+element types. Adapting such terms on their own is not supported yet: Adapt.jl's fallback may return them unchanged.
 """
 Adapt.adapt_structure(to, reg::AdaptableRegularization) = adaptRegularization(regularizationAdaptContext(to), reg)
 Adapt.adapt_structure(to, params::TVParams) = adaptRegularization(regularizationAdaptContext(to), params)
@@ -67,7 +68,7 @@ function adaptRegularization(ctx::CGNRAdaptContext, reg::TransformedRegularizati
 end
 adaptRegularization(ctx::CGNRAdaptContext, reg::TVRegularization) = get!(ctx.memo, reg) do
   params = isnothing(reg.params) ? nothing : adaptRegularization(ctx, reg.params)
-  TVRegularization(reg.λ, reg.dims isa Array ? copy(reg.dims) : reg.dims, reg.shape, reg.iterationsTV, params)
+  TVRegularization(reg.λ, adaptDims(reg.dims), reg.shape, reg.iterationsTV, params)
 end
 # The cached gradient operator is adapted as is, it can differ from the one the term's current shape would create
 adaptRegularization(ctx::CGNRAdaptContext, p::TVParams) = get!(ctx.memo, p) do
@@ -75,6 +76,10 @@ adaptRegularization(ctx::CGNRAdaptContext, p::TVParams) = get!(ctx.memo, p) do
            adaptVector(ctx, p.xTmp, "TVParams.xTmp"), adaptComponent(ctx, p.∇, "TVParams.∇"))
 end
 adaptRegularization(ctx::CGNRAdaptContext, reg) = adaptError(ctx, "unsupported regularization term $(typeof(reg))")
+
+# `dims` is host metadata: ranges, integers and tuples are immutable, other arrays (including views) are copied
+adaptDims(dims::AbstractArray) = dims isa AbstractRange ? dims : collect(dims)
+adaptDims(dims) = dims
 
 # Scale factors are scalars or `nothing`, except for array-valued L2 weights, where they can be arrays as well
 adaptFactor(ctx::CGNRAdaptContext, factor::AbstractArray{<:Number}) = adaptVector(ctx, factor, "scale factor")
