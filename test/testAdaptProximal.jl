@@ -13,6 +13,15 @@ proxRestart(Solver) = Solver === OptISTA ? (;) : (; restart = :gradient)
 
 struct CustomProxState{S} <: RegularizedLeastSquares.AbstractSolverState{S} end
 
+# a matrix-backed LinearOperator normal with an owner Adapt rule
+struct ProxMatProd{M}
+  M::M
+end
+(p::ProxMatProd)(res, v, α, β) = mul!(res, p.M, v, α, β)
+proxOwnedNormal(M) = LinearOperator(eltype(M), size(M)..., true, true, ProxMatProd(M); S = typeof(similar(M, 0)))
+Adapt.adapt_structure(to, op::LO.LinearOperator{T, S, I, <:ProxMatProd}) where {T, S, I} = proxOwnedNormal(Adapt.adapt(to, op.prod!.M))
+tvBuffers(reg) = (reg.params.pq, reg.params.rs, reg.params.pqOld, reg.params.xTmp)
+
 # Square, well-conditioned systems (n = 6, a 2×3 image for TV and PnP); returns A, constructor keywords and the rhs
 function proxSystem(T, graph; seed = 58)
   rng = MersenneTwister(seed)
@@ -74,6 +83,12 @@ function testProxAdaptSolve(target, Solver, T, graph, terms)
   moved = Adapt.adapt(target, source)
   checkProxMoved(moved, source, target)
   terms == :scaled && @test moved.reg.factor == source.reg.factor
+  if terms == :tv   # warmed buffers are the moved term's own
+    tvBefore = map(v -> copy(Array(v)), tvBuffers(source.reg))
+    @test all(((v, w),) -> v isa target && v !== w && isequal(Array(v), w), zip(tvBuffers(moved.reg), tvBefore))
+  elseif terms == :pnp   # the model's owner rule decides: Adapt.adapt(Array, w) keeps w
+    @test target === Array ? moved.reg.model.w === source.reg.model.w : moved.reg.model.w isa target
+  end
   reference = deepcopy(source)
   @test Array(proxIterate!(moved, 3)) ≈ proxIterate!(reference, 3) rtol = 2e-4
   @test isequal(proxSnapshot(source), before)
@@ -84,6 +99,11 @@ function testProxAdaptSolve(target, Solver, T, graph, terms)
   @test proxIterate!(back, 2) ≈ Array(proxIterate!(moved, 2)) rtol = 2e-4
   for s in (moved, back), l in proxLeaves(s.state), v in proxVectors(l)
     fill!(v, zero(eltype(v)))
+  end
+  if terms == :tv
+    @test all(v -> v isa Array, tvBuffers(back.reg))
+    foreach(v -> fill!(v, zero(eltype(v))), (tvBuffers(moved.reg)..., tvBuffers(back.reg)...))
+    @test isequal(map(Array, tvBuffers(source.reg)), tvBefore)
   end
   @test isequal(proxSnapshot(source), before)
   if graph in (:collection, :weighted)
@@ -162,6 +182,17 @@ function testProxAdaptDefaultNormal(target, Solver, T)
   x = source.state.x
   @test regRejects(() -> Adapt.adapt(target, source), "normalOperator")
   @test source.state.x === x
+  # an explicit LinearOperator AHA with its own Adapt rule is rebuilt, not rejected
+  if T <: Real
+    b = randn(MersenneTwister(74), T, 6)
+    source = Solver(WeightingOp(w); AHA = proxOwnedNormal(N), reg = L1Regularization(0.01f0))
+    init!(source, b)
+    proxIterate!(source, 2)
+    moved, reference = Adapt.adapt(target, source), deepcopy(source)
+    @test moved.AHA.prod!.M isa target && moved.AHA.prod!.M !== source.AHA.prod!.M
+    @test Array(moved.AHA * target(v)) ≈ N * v
+    @test Array(proxIterate!(moved, 3)) ≈ proxIterate!(reference, 3) rtol = 2e-4
+  end
   # a dense A keeps its matrix default, which moves
   M = Matrix(Diagonal(w))
   moved = Adapt.adapt(target, Solver(M; reg = L1Regularization(0.01f0)))
@@ -181,6 +212,8 @@ function testProxAdaptErrors(target, Solver)
   L = LinearOperator(M)
   @test_throws ArgumentError Adapt.adapt(target, Solver(M; AHA = L' * L, reg = L1Regularization(0.01f0)))
   @test regRejects(() -> Adapt.adapt(target, Solver(M; reg = [L1Regularization(0.01f0), CustomRegTerm()])), "CustomRegTerm")
+  nested = Solver(M; reg = [L1Regularization(0.01f0), MaskedRegularization(CustomRegTerm(), fill(true, 6))])
+  @test regRejects(() -> Adapt.adapt(target, nested), "CustomRegTerm")
   custom = Solver(M; reg = L1Regularization(0.01f0))
   custom.state = CustomProxState{Solver}()
   @test regRejects(() -> Adapt.adapt(target, custom), "unsupported solver state")
