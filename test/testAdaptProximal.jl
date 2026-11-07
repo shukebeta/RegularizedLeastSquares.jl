@@ -20,6 +20,17 @@ end
 (p::ProxMatProd)(res, v, α, β) = mul!(res, p.M, v, α, β)
 proxOwnedNormal(M) = LinearOperator(eltype(M), size(M)..., true, true, ProxMatProd(M); S = typeof(similar(M, 0)))
 Adapt.adapt_structure(to, op::LO.LinearOperator{T, S, I, <:ProxMatProd}) where {T, S, I} = proxOwnedNormal(Adapt.adapt(to, op.prod!.M))
+# the same, with an owner rule that fails on its first invocation and counts its calls
+struct ProxFailingProd{M}
+  M::M
+  calls::Base.RefValue{Int}
+end
+(p::ProxFailingProd)(res, v, α, β) = mul!(res, p.M, v, α, β)
+function Adapt.adapt_structure(to, op::LO.LinearOperator{T, S, I, <:ProxFailingProd}) where {T, S, I}
+  op.prod!.calls[] += 1
+  op.prod!.calls[] == 1 && throw(LO.LinearOperatorException("owner adaptation failed"))
+  return proxOwnedNormal(Adapt.adapt(to, op.prod!.M))
+end
 tvBuffers(reg) = (reg.params.pq, reg.params.rs, reg.params.pqOld, reg.params.xTmp)
 
 # Square, well-conditioned systems (n = 6, a 2×3 image for TV and PnP); returns A, constructor keywords and the rhs
@@ -192,6 +203,15 @@ function testProxAdaptDefaultNormal(target, Solver, T)
     @test moved.AHA.prod!.M isa target && moved.AHA.prod!.M !== source.AHA.prod!.M
     @test Array(moved.AHA * target(v)) ≈ N * v
     @test Array(proxIterate!(moved, 3)) ≈ proxIterate!(reference, 3) rtol = 2e-4
+    # a failing owner rule is reported once, with the component, and not retried
+    calls = Ref(0)
+    failing = LinearOperator(T, 6, 6, true, true, ProxFailingProd(N, calls))
+    source = Solver(WeightingOp(w); AHA = failing, reg = L1Regularization(0.01f0))
+    @test regRejects(() -> Adapt.adapt(target, source), "AHA")
+    @test calls[] == 1
+    calls[] = 0
+    err = try Adapt.adapt(target, source) catch e e end
+    @test occursin("owner adaptation failed", sprint(showerror, err)) && calls[] == 1
   end
   # a dense A keeps its matrix default, which moves
   M = Matrix(Diagonal(w))

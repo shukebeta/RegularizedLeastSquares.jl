@@ -48,14 +48,15 @@ function Adapt.adapt_structure(to, solver::S) where S <: ProximalSolver
 end
 
 # A closure-based AHA, e.g. the default A' * A, of an operator A that has a structured normal operator, whose Adapt
-# fallback returns it unchanged. A LinearOperator with its own Adapt rule is rebuilt as usual (the result is memoized).
+# fallback returns it unchanged. A LinearOperator with its own Adapt rule is rebuilt here once (the result is memoized
+# for adaptNormal), and a failure of that rule is reported as such.
 function opaqueNormal(ctx::CGNRAdaptContext, A, AHA)
   (A isa LinearOperatorCollection.AbstractLinearOperatorFromCollection && AHA isa LinearOperators.LinearOperator) || return false
   AHA′ = try
     Adapt.adapt(ctx.to, AHA)
   catch e
     e isa LinearOperators.LinearOperatorException || rethrow()
-    return false   # reported by adaptComponent
+    adaptError(ctx, "AHA of type $(typeof(AHA)) could not be adapted: $(sprint(showerror, e))")
   end
   return AHA′ === AHA
 end
