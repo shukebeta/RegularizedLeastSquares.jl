@@ -6,8 +6,10 @@ function testMultiThreadingSolver(; arrayType=Array, scheduler=MultiDataState)
   solvers = linearSolverList()
   @testset "$(solvers[i])" for i = 1:length(solvers)
     S = createLinearSolver(solvers[i], arrayType(A), iterations=100)
-    # CGNR, FISTA, OptISTA and POGM do not switch backends implicitly
-    solvers[i] <: Union{CGNR, FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
+    # CGNR does not switch backends implicitly
+    solvers[i] <: CGNR && (S = Adapt.adapt(arrayType, S))
+    # neither do FISTA, OptISTA and POGM; CPU runs keep using the constructed solver
+    arrayType != Array && solvers[i] <: Union{FISTA, OptISTA, POGM} && (S = Adapt.adapt(arrayType, S))
 
     x_sequential = hcat([Array(solve!(S, arrayType(b[:, j]))) for j = 1:size(b, 2)]...)
     @test x_sequential ≈ x rtol = 0.1
