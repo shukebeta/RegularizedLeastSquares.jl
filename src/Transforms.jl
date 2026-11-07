@@ -64,6 +64,14 @@ end
 
 function inverse_transform(transform::ClampedScalingTransform, x)
     out = x .* (transform.v_max - transform.v_min) .+ transform.v_min
-    out[transform.mask] = transform.x[transform.mask]
+    # out[mask] = transform.x[mask], elementwise so that it also runs on GPU arrays
+    mask = transform.mask
+    for A in (out, transform.x)
+        logicalIndexInBounds(A, mask) || Base.throw_boundserror(A, (mask,))
+    end
+    vec(out) .= ifelse.(vec(mask), vec(transform.x), vec(out))
     return out
 end
+
+# Bounds of `A[mask]` with a single logical index, from the axes only: a mask of the same shape, or a mask vector over the linear indices
+logicalIndexInBounds(A, mask) = ndims(A) == ndims(mask) ? axes(A) == axes(mask) : mask isa AbstractVector && eachindex(IndexLinear(), A) == axes(mask, 1)

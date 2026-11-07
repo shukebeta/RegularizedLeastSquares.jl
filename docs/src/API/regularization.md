@@ -46,6 +46,8 @@ RegularizedLeastSquares.PlugAndPlayRegularization
 ```@docs
 RegularizedLeastSquares.Adapt.adapt_structure(::Any, ::RegularizedLeastSquares.AdaptableRegularization)
 ```
+The transform objects created by the `input_transform` factories of a `PlugAndPlayRegularization`, such as a
+`ClampedScalingTransform`, can be moved with `Adapt.adapt` as well, e.g. by the Adapt rule of a factory that retains one.
 
 ## Miscellaneous Functions
 ```@docs

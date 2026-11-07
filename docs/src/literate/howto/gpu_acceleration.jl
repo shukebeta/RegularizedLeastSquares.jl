@@ -41,8 +41,19 @@ isapprox(Array(x_adapted), x_cpu)
 # `AutoScaledRegularization` factor or the buffers of a `TVRegularization`, and shares no data with `reg`:
 reg = AutoScaledRegularization(L2Regularization(0.0001))
 gpu_reg = Adapt.adapt(gpu, reg)
-# Unsupported terms and transforms inside a supported term, such as a `PlugAndPlayRegularization` or a closure-based `LinearOperator`,
-# raise an `ArgumentError`. Adapting callable terms such as `PlugAndPlayRegularization` on their own is not supported yet.
+# Projection and plug-and-play terms are moved with the Adapt rules of their callables. Closures are rebuilt by Adapt.jl; a callable
+# type that holds data, such as a learned model, needs its own `Adapt.adapt_structure` rule, which decides what it moves:
+struct Shrink{V}
+  w::V
+end
+(s::Shrink)(x) = x .* reshape(s.w, size(x))
+Adapt.adapt_structure(to, s::Shrink) = Shrink(Adapt.adapt(to, s.w))
+pnp = PlugAndPlayRegularization(0.5f0; model = Shrink(rand(Float32, 16)), shape = [4, 4])
+gpu_pnp = Adapt.adapt(gpu, pnp)
+prox!(gpu_pnp, gpu(rand(Float32, 16)));
+# Global variables used by these functions are not moved. Opaque closures, closures capturing a reassigned variable and callables
+# without an Adapt rule raise an `ArgumentError`, as do unsupported terms and transforms inside a supported term, e.g. a closure-based
+# `LinearOperator`.
 
 # ## Matrix-Free Operators
 # A special case is the usage of matrix-free operators. Since these operators do not have a concrete matrix representation, their GPU support depends on their implementation.

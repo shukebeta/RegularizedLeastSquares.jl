@@ -10,6 +10,9 @@ regWeights(n; seed = 55) = rand(MersenneTwister(seed), Float32, n) .+ 0.5f0
 isOn(x::AbstractArray, target) = x isa target
 isOn(op, target) = RegLO.storage_type(op) <: target
 
+# the rejection is an ArgumentError naming the offending component
+regRejects(f, needle) = try f(); false catch e; e isa ArgumentError && occursin(needle, sprint(showerror, e)) end
+
 struct CustomRegTerm <: RegularizedLeastSquares.AbstractProjectionRegularization end
 struct RegNoopAdaptor end
 struct RegToFloat64Adaptor end
@@ -182,11 +185,9 @@ end
 function testRegAdaptErrors(target)
   n = 6
   D = randn(MersenneTwister(3), Float32, n, n)
-  # the rejection is an ArgumentError naming the offending component
-  rejects(f, needle) = try f(); false catch e; e isa ArgumentError && occursin(needle, sprint(showerror, e)) end
+  rejects = regRejects
   mask = [true, false, true, true, false, false]
   @test rejects(() -> Adapt.adapt(target, MaskedRegularization(CustomRegTerm(), mask)), "CustomRegTerm")
-  @test rejects(() -> Adapt.adapt(target, MaskedRegularization(ProjectionRegularization(), mask)), "ProjectionRegularization")
   opaque = AutoScaledRegularization(TransformedRegularization(L1Regularization(0.1f0), RegLO.LinearOperator(D)))
   trafo = opaque.reg.trafo
   @test rejects(() -> Adapt.adapt(target, opaque), "no Adapt rule")
@@ -202,6 +203,183 @@ function testRegAdaptErrors(target)
   end
 end
 
+# Callables of projection and plug-and-play terms
+const RegCST = RegularizedLeastSquares.ClampedScalingTransform
+struct RegScaleProj{V} <: Function   # projection callable owning data, with an owner rule
+  w::V
+end
+(p::RegScaleProj)(x) = x .* p.w
+Adapt.adapt_structure(to, p::RegScaleProj) = RegScaleProj(Adapt.adapt(to, p.w))
+struct RegModel{V}   # PnP model owning data, with an owner rule
+  w::V
+end
+(m::RegModel)(x) = x .* reshape(m.w, size(x))
+Adapt.adapt_structure(to, m::RegModel) = RegModel(Adapt.adapt(to, m.w))
+struct RegFixedFactory{Tr}   # input-transform factory retaining a transform, with an owner rule
+  t::Tr
+end
+(f::RegFixedFactory)(x) = f.t
+Adapt.adapt_structure(to, f::RegFixedFactory) = RegFixedFactory(Adapt.adapt(to, f.t))
+struct RegNoRuleModel{V}; w::V; end
+(m::RegNoRuleModel)(x) = x
+struct RegNoRuleProj{V} <: Function; w::V; end
+(p::RegNoRuleProj)(x) = x
+struct RegThrowingModel end
+(m::RegThrowingModel)(x) = x
+Adapt.adapt_structure(to, m::RegThrowingModel) = error("owner rule failed")
+struct RegStatelessModel end
+(m::RegStatelessModel)(x) = x
+Adapt.adapt_structure(to, m::RegStatelessModel) = m
+
+# An adaptor with rules of its own, for children with both a general and an adaptor-specific rule
+struct RegCountingAdaptor
+  count::Base.RefValue{Int}
+end
+Adapt.adapt_storage(::RegCountingAdaptor, x::Array) = JLArray(x)
+struct RegCountChild{V}; w::V; end
+Adapt.adapt_structure(to, c::RegCountChild) = RegCountChild(Adapt.adapt(to, c.w))
+Adapt.adapt_structure(a::RegCountingAdaptor, c::RegCountChild) = (a.count[] += 1; RegCountChild(JLArray(2 .* c.w)))
+struct RegCountModel{V}; w::V; end
+(m::RegCountModel)(x) = x .* reshape(m.w, size(x))
+Adapt.adapt_structure(to, m::RegCountModel) = RegCountModel(Adapt.adapt(to, m.w))
+Adapt.adapt_structure(a::RegCountingAdaptor, m::RegCountModel) = (a.count[] += 1; RegCountModel(JLArray(2 .* m.w)))
+struct RegHolder{C}; child::C; end
+(h::RegHolder)(x) = x .* reshape(h.child.w, size(x))
+Adapt.adapt_structure(to, h::RegHolder) = RegHolder(Adapt.adapt(to, h.child))
+struct RegCountArr{V} <: AbstractVector{Float32}; data::V; end
+Base.size(a::RegCountArr) = size(a.data)
+Base.getindex(a::RegCountArr, i::Int) = a.data[i]
+Adapt.adapt_structure(to, a::RegCountArr) = RegCountArr(Adapt.adapt(to, a.data))
+Adapt.adapt_structure(a::RegCountingAdaptor, c::RegCountArr) = (a.count[] += 1; JLArray(2 .* c.data))
+
+regScale(v, s) = y -> y .* v .* s          # closure capturing a plain array and a number
+regHold(c) = y -> y .* reshape(c.w, size(y))   # closure capturing a child with its own rules
+regCounting(c) = y -> (c[] += 1; y)        # closure capturing external mutable state
+function regBoxed(n)                       # closure capturing a reassigned variable
+  w = regWeights(n)
+  f = y -> y .* w
+  w = regWeights(n; seed = 70)
+  return f
+end
+
+function testRegAdaptCallables(target, T)
+  n = 12
+  x = regData(T, n)
+  w = regWeights(n)
+  for proj in (ProjectionRegularization(), ProjectionRegularization(projFunc = regScale(copy(w), 2f0)), ProjectionRegularization(projFunc = RegScaleProj(copy(w))))
+    moved = checkProx(proj, target, x)
+    if target === Array
+      back = Adapt.adapt(Array, Adapt.adapt(JLArray, proj))
+      @test regApprox(prox!(back, copy(x)), prox!(deepcopy(proj), copy(x)))
+    end
+    f, f′ = proj.projFunc, moved.projFunc
+    if f isa RegScaleProj && target !== Array
+      @test f′.w isa target
+      f′.w .= 0   # mutating owned data of the adapted term leaves the source alone
+      @test f.w == w
+    elseif !(f isa RegScaleProj) && fieldcount(typeof(f)) > 0
+      @test f′.v isa target && f′.v !== f.v && f′.s === 2f0   # plain captures get their own copies, also on Array
+      f′.v .= 0
+      @test f.v == w
+    end
+  end
+  checkProx(MaskedRegularization(ProjectionRegularization(), Bool[1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0]), target, x)
+
+  c = Ref(0)   # captured mutable state keeps Adapt's semantics: shared, not cloned
+  prox!(Adapt.adapt(target, ProjectionRegularization(projFunc = regCounting(c))), target(x))
+  @test c[] == 1
+
+  shape = [3, 4]
+  model = RegModel(regWeights(n; seed = 60))
+  data = reshape(Float32[-1, 0.5, 0, 2, 0.25, 1, -0.5, 0.75, 3, 0.1, 1, 0.9], 3, 4)
+  clamped = RegCST(data, 0f0, 1f0)
+  snapshot = (copy(model.w), copy(clamped.mask), copy(clamped.x))
+  for factory in (RegularizedLeastSquares.IdentityTransform, RegularizedLeastSquares.MinMaxTransform, RegularizedLeastSquares.ZTransform, RegFixedFactory(clamped)), ignoreIm in (false, true)
+    pnp = PlugAndPlayRegularization(0.5f0; model, shape, input_transform = factory, ignoreIm)
+    moved = checkProx(pnp, target, x; withNorm = false)   # PnP has no norm
+    @test moved.λ === 0.5f0 && moved.ignoreIm == ignoreIm && moved.shape == shape && moved.shape !== pnp.shape
+    if factory isa RegFixedFactory
+      t′ = moved.input_transform.t
+      @test t′ isa RegCST && t′.mask isa target && t′.x isa target && t′.x !== clamped.x
+    else
+      @test moved.input_transform === factory
+    end
+    if target === Array
+      back = Adapt.adapt(Array, Adapt.adapt(JLArray, pnp))
+      @test regApprox(prox!(back, copy(x)), prox!(deepcopy(pnp), copy(x)))
+    else
+      @test moved.model.w isa target
+      moved.model.w .= 0
+    end
+    @test all(map(isequal, snapshot, (model.w, clamped.mask, clamped.x)))   # source untouched
+  end
+end
+
+# Transform objects, and the restoration of clamped values by the elementwise inverse
+function testRegAdaptTransforms(target)
+  inv, fwd = RegularizedLeastSquares.inverse_transform, RegularizedLeastSquares.transform
+  # below minimum, minimum, interior, maximum and above maximum
+  data = Float32[-1, 0, 0.3, 1, 2, 0.7]
+  t = RegCST(data, 0f0, 1f0)
+  t′ = Adapt.adapt(target, t)
+  @test t′.mask isa target && t′.x isa target && t′.x !== t.x && Array(t′.mask) == t.mask
+  @test regApprox(Array(fwd(t′, target(data))), fwd(t, data))
+  z = rand(MersenneTwister(62), Float32, 6)
+  old(out, t) = (out = copy(out); out[t.mask] = t.x[t.mask]; out)   # the previous masked restoration
+  ref = old(z, t)
+  @test inv(t, z) == ref && ref[t.mask] == data[t.mask] && t.mask == Bool[1, 0, 0, 1, 1, 0]
+  @test regApprox(Array(inv(t′, target(z))), ref)
+  # a mask vector over a matrix restores by linear index, an incompatible mask shape is out of bounds
+  z23 = reshape(z, 2, 3)
+  @test inv(t, z23) == old(z23, t)
+  @test regApprox(Array(inv(t′, target(z23))), old(z23, t))
+  t31 = RegCST(reshape(Float32[-1, 0.5, 2], 3, 1), 0f0, 1f0)
+  z32 = rand(MersenneTwister(63), Float32, 3, 2)
+  @test_throws BoundsError old(z32, t31)
+  @test_throws BoundsError inv(t31, z32)
+  @test_throws BoundsError inv(Adapt.adapt(target, t31), target(z32))
+
+  zt = RegularizedLeastSquares.ZTransform(regWeights(6), regWeights(6; seed = 64))
+  zt′ = Adapt.adapt(target, zt)
+  @test zt′.mean isa target && zt′.mean !== zt.mean && regApprox(Array(fwd(zt′, target(data))), fwd(zt, data))
+  mm = RegularizedLeastSquares.MinMaxTransform(data)
+  @test Adapt.adapt(target, mm) === mm   # scalar fields
+end
+
+function testRegAdaptCallableErrors(target)
+  n = 4
+  x = regData(Float32, n)
+  pnp(model) = PlugAndPlayRegularization(0.5f0; model, shape = [n])
+  @test regRejects(() -> Adapt.adapt(target, pnp(RegNoRuleModel(regWeights(n)))), "RegNoRuleModel")
+  @test regRejects(() -> Adapt.adapt(target, ProjectionRegularization(projFunc = RegNoRuleProj(regWeights(n)))), "RegNoRuleProj")
+  @test regRejects(() -> Adapt.adapt(target, ProjectionRegularization(projFunc = Base.Experimental.@opaque y -> y)), "opaque closure")
+  boxed = regBoxed(n)
+  @test fieldtypes(typeof(boxed)) == (Core.Box,)
+  @test regRejects(() -> Adapt.adapt(target, ProjectionRegularization(projFunc = boxed)), "Core.Box")
+  @test regRejects(() -> Adapt.adapt(target, MaskedRegularization(ProjectionRegularization(projFunc = boxed), trues(n))), "ProjectionRegularization.projFunc")
+  @test_throws ErrorException Adapt.adapt(target, pnp(RegThrowingModel()))   # errors of an owner rule propagate
+  stateless = RegStatelessModel()
+  @test Adapt.adapt(target, pnp(stateless)).model === stateless
+  s = CGNR(randn(Float32, n, n); reg = L2Regularization(0.1f0))   # CGNR's own gate still rejects projections
+  @test regRejects(() -> Adapt.adapt(target, CGNR(s.A, s.AHA, s.L2, [ProjectionRegularization()], s.normalizeReg, s.iterations, s.state)), "ProjectionRegularization")
+
+  if target === JLArray   # rules specific to the user's adaptor apply once, at every level
+    w = regWeights(n)
+    for model in (RegCountModel(copy(w)), RegHolder(RegCountChild(copy(w))))
+      a = RegCountingAdaptor(Ref(0))
+      m′ = Adapt.adapt(a, pnp(model)).model
+      @test a.count[] == 1 && Array(m′ isa RegHolder ? m′.child.w : m′.w) == 2 .* w
+    end
+    a = RegCountingAdaptor(Ref(0))
+    moved = Adapt.adapt(a, ProjectionRegularization(projFunc = regHold(RegCountChild(copy(w)))))
+    @test a.count[] == 1 && Array(moved.projFunc.c.w) == 2 .* w
+    a = RegCountingAdaptor(Ref(0))
+    v = view(RegCountArr(Float32[1, 2]), :)
+    moved = Adapt.adapt(a, ProjectionRegularization(projFunc = regScale(v, 1f0)))
+    @test a.count[] == 1 && Array(moved.projFunc.v) == Float32[2, 4] && v == Float32[1, 2]
+  end
+end
+
 @testset "Regularization Adapt" begin
   for target in regTargets
     @testset "$target" begin
@@ -209,10 +387,13 @@ end
         @testset "graph $T" begin testRegAdaptGraph(target, T) end
         @testset "TV $T" begin testRegAdaptTV(target, T) end
         @testset "execution $T" begin testRegAdaptExecution(target, T) end
+        @testset "callables $T" begin testRegAdaptCallables(target, T) end
       end
       @testset "array factors" begin testRegAdaptFactors(target) end
       @testset "docstring example" begin testRegAdaptExample(target) end
       @testset "errors" begin testRegAdaptErrors(target) end
+      @testset "transforms" begin testRegAdaptTransforms(target) end
+      @testset "callable errors" begin testRegAdaptCallableErrors(target) end
     end
   end
 end
